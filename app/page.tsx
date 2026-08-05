@@ -264,7 +264,7 @@ export default function FleetPage() {
                             fontWeight: 600,
                           }}
                         >
-                          {boat.nickname || "PMDP Vessel"}
+                          {boat.nickname}
                         </div>
                       </div>
 
