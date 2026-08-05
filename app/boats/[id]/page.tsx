@@ -1389,8 +1389,8 @@ ${error.message}`);
           }}
         >
           <img
-            src="/zodiac_schematic.jpg"
-            alt="Zodiac schematic"
+            src={boat.schematic}
+            alt="Schematic"
             style={{
               width: "100%",
               display: "block",
