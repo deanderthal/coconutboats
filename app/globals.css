@@ -1,0 +1,164 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+.boat-card {
+  transition:
+    transform 0.2s ease,
+    border-color 0.2s ease,
+    box-shadow 0.2s ease;
+}
+
+.boat-card:hover {
+  transform: translateY(-5px);
+  border-color: #38bdf8 !important;
+  box-shadow: 0 18px 45px rgba(0, 0, 0, 0.4) !important;
+}
+
+.boat-card:hover .boat-image {
+  transform: scale(1.035);
+}
+
+.boat-card:active {
+  transform: translateY(-1px);
+}
+
+/* Shared responsive layout */
+
+.page-shell {
+  width: 100%;
+  max-width: 1500px;
+  margin: 0 auto;
+  padding: 2rem;
+}
+
+.responsive-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+.responsive-grid-equal {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1.5rem;
+  align-items: start;
+}
+
+.tab-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.full-width-control {
+  width: 100%;
+  min-width: 0;
+  min-height: 46px;
+}
+
+@media (max-width: 750px) {
+  .page-shell {
+    padding: 1rem;
+  }
+
+  .responsive-grid,
+  .responsive-grid-equal {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .tab-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .mobile-full-width {
+    width: 100% !important;
+  }
+
+  h1 {
+    font-size: 2rem !important;
+  }
+}
+
+/* Boat page navigation and phone layout */
+.boat-status-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  margin: 1rem 0 1.5rem;
+}
+
+.boat-tabs {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.65rem;
+  margin: 1rem 0 1.25rem;
+}
+
+.boat-tab {
+  appearance: none;
+  width: 100%;
+  min-width: 0;
+  min-height: 50px;
+  padding: 0.75rem 0.5rem;
+  border: 1px solid #334155;
+  border-radius: 12px;
+  background: #020617;
+  color: #cbd5e1;
+  font: inherit;
+  font-weight: 750;
+  line-height: 1.15;
+  text-align: center;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.boat-tab-active {
+  border-color: #38bdf8;
+  background: #0c2942;
+  color: #7dd3fc;
+  box-shadow: inset 0 0 0 1px rgba(56, 189, 248, 0.25);
+}
+
+@media (max-width: 750px) {
+  .boat-tabs {
+    gap: 0.4rem;
+    margin-top: 0.75rem;
+  }
+
+  .boat-tab {
+    min-height: 54px;
+    padding: 0.65rem 0.25rem;
+    font-size: 0.86rem;
+  }
+
+  .boat-status-row > span {
+    flex: 1 1 auto;
+    text-align: center;
+  }
+}
