@@ -464,6 +464,7 @@ export default function BoatPage({ params }: { params: Promise<{ id: string }> }
         <MaintenanceLog
           boatId={boat.id}
           todos={todos}
+          schematic={boat.schematic}
           maintenanceRecords={maintenanceRecords}
           addMaintenance={addMaintenance}
           deleteMaintenance={deleteMaintenance}
@@ -976,6 +977,7 @@ function TodoList({
 
 function MaintenanceLog({
   boatId,
+  schematic,
   todos,
   maintenanceRecords,
   addMaintenance,
@@ -983,12 +985,13 @@ function MaintenanceLog({
   exportMaintenance,
 }: {
   boatId: number;
+  schematic: string | null;
   todos: Todo[];
   maintenanceRecords: MaintenanceRecord[];
   addMaintenance: (record: MaintenanceRecord) => Promise<void>;
   deleteMaintenance: (id: number) => Promise<void>;
   exportMaintenance: () => void;
-}) {
+}){
   const [pins, setPins] = useState<Pin[]>([]);
   const [selectedPinId, setSelectedPinId] = useState<number | null>(null);
   const [placingPin, setPlacingPin] = useState(false);
@@ -1389,7 +1392,7 @@ ${error.message}`);
           }}
         >
           <img
-            src={boat.schematic}
+            src={schematic}
             alt="Schematic"
             style={{
               width: "100%",
