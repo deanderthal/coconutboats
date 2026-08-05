@@ -985,7 +985,7 @@ function MaintenanceLog({
   exportMaintenance,
 }: {
   boatId: number;
-  schematic: string | null;
+  schematic?: string;
   todos: Todo[];
   maintenanceRecords: MaintenanceRecord[];
   addMaintenance: (record: MaintenanceRecord) => Promise<void>;
