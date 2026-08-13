@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { DUE_SOON_DAYS, summarizeDueDates, type DueSummary } from "@/lib/due";
+import { isEngineServiceDue } from "@/lib/engine-service";
 
 import { fetchBoats, type Boat } from "@/app/data/boats";
 
@@ -15,12 +16,14 @@ export default function FleetPage() {
   const [dueSummaries, setDueSummaries] = useState<
     Record<string, DueSummary>
   >({});
+  const [engineServiceDue, setEngineServiceDue] = useState<Record<string, number>>({});
 
   useEffect(() => {
     async function loadFleet() {
-      const [boatsResult, todosResult] = await Promise.allSettled([
+      const [boatsResult, maintenanceResult, enginesResult] = await Promise.allSettled([
         fetchBoats(supabase),
-        supabase.from("todos").select("boat_id, due_date"),
+        supabase.from("maintenance_records").select("boat_id, due_date, status").neq("status", "Done"),
+        supabase.from("engines").select("boat_id, service_hours, service_interval_hours").not("boat_id", "is", null),
       ]);
 
       if (boatsResult.status === "rejected") {
@@ -32,25 +35,25 @@ export default function FleetPage() {
 
       setBoats(boatsResult.value);
 
-      if (todosResult.status === "rejected" || todosResult.value.error) {
+      if (maintenanceResult.status === "rejected" || maintenanceResult.value.error) {
         console.error(
           "Could not load due-date summaries:",
-          todosResult.status === "rejected"
-            ? todosResult.reason
-            : todosResult.value.error
+          maintenanceResult.status === "rejected"
+            ? maintenanceResult.reason
+            : maintenanceResult.value.error
         );
         setLoading(false);
         return;
       }
 
-      const data = todosResult.value.data;
+      const data = maintenanceResult.value.data;
 
-      const grouped: Record<string, Array<{ dueDate: string | null }>> = {};
+      const grouped: Record<string, Array<{ due_date: string | null }>> = {};
 
-      for (const todo of data ?? []) {
-        const boatId = String(todo.boat_id);
+      for (const record of data ?? []) {
+        const boatId = String(record.boat_id);
         grouped[boatId] ??= [];
-        grouped[boatId].push({ dueDate: todo.due_date });
+        grouped[boatId].push({ due_date: record.due_date });
       }
 
       const summaries: Record<string, DueSummary> = {};
@@ -59,6 +62,22 @@ export default function FleetPage() {
       }
 
       setDueSummaries(summaries);
+
+      if (enginesResult.status === "rejected" || enginesResult.value.error) {
+        console.error(
+          "Could not load engine service summaries:",
+          enginesResult.status === "rejected" ? enginesResult.reason : enginesResult.value.error
+        );
+      } else {
+        const serviceCounts: Record<string, number> = {};
+        for (const engine of enginesResult.value.data ?? []) {
+          if (engine.boat_id == null || !isEngineServiceDue(engine)) continue;
+          const boatId = String(engine.boat_id);
+          serviceCounts[boatId] = (serviceCounts[boatId] ?? 0) + 1;
+        }
+        setEngineServiceDue(serviceCounts);
+      }
+
       setLoading(false);
     }
 
@@ -133,6 +152,7 @@ export default function FleetPage() {
         >
           {boats.map((boat) => {
             const due = dueSummaries[boat.id] ?? { overdue: 0, dueSoon: 0 };
+            const servicesDue = engineServiceDue[boat.id] ?? 0;
 
             return (
               <Link
@@ -167,7 +187,7 @@ export default function FleetPage() {
                     {boat.photo ? (
                       <Image
                         src={boat.photo}
-                        alt={`${boat.name} ${boat.nickname}`}
+                        alt={`${boat.name} ${boat.nickname ?? ""}`}
                         fill
                         sizes="(max-width: 700px) 100vw, 33vw"
                         style={{
@@ -260,11 +280,11 @@ export default function FleetPage() {
                           style={{
                             minHeight: "1.4rem",
                             marginTop: ".2rem",
-                            color: boat.nickname ? "#38bdf8" : "#64748b",
+                            color: boat.nickname ?? "" ? "#38bdf8" : "#64748b",
                             fontWeight: 600,
                           }}
                         >
-                          {boat.nickname}
+                          {boat.nickname ?? ""}
                         </div>
                       </div>
 
@@ -278,12 +298,43 @@ export default function FleetPage() {
                       </div>
                     </div>
 
+                    {servicesDue > 0 && (
+                      <div
+                        style={{
+                          display: "flex",
+                          justifyContent: "space-between",
+                          alignItems: "center",
+                          gap: ".75rem",
+                          marginTop: "1rem",
+                          padding: ".65rem .75rem",
+                          borderRadius: "10px",
+                          background: "#450a0a",
+                          border: "1px solid #991b1b",
+                          color: "#fecaca",
+                        }}
+                      >
+                        <strong style={{ fontSize: ".88rem" }}>ENGINE SERVICE DUE</strong>
+                        <strong
+                          style={{
+                            minWidth: "2rem",
+                            padding: ".2rem .55rem",
+                            borderRadius: "999px",
+                            textAlign: "center",
+                            background: "#7f1d1d",
+                            color: "#fecaca",
+                          }}
+                        >
+                          {servicesDue}
+                        </strong>
+                      </div>
+                    )}
+
                     <div
                       style={{
                         display: "flex",
                         justifyContent: "space-between",
                         alignItems: "center",
-                        marginTop: "1rem",
+                        marginTop: servicesDue > 0 ? ".7rem" : "1rem",
                         paddingTop: ".9rem",
                         borderTop: "1px solid #334155",
                       }}

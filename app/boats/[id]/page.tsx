@@ -1,2149 +1,683 @@
 "use client";
 
-import { use, useEffect, useState, type ChangeEvent, type MouseEvent } from "react";
-
+import { use, useEffect, useMemo, useState, type ChangeEvent, type MouseEvent } from "react";
+import Link from "next/link";
 import { fetchBoat, type Boat } from "@/app/data/boats";
 import { supabase } from "@/lib/supabase";
-import { DUE_SOON_DAYS, summarizeDueDates } from "@/lib/due";
+import { DUE_SOON_DAYS, isOverdue, isWithinDays, summarizeDueDates } from "@/lib/due";
+import { engineServiceInterval, isEngineServiceDue } from "@/lib/engine-service";
 
-const tabs = ["Overview", "Maintenance Log", "To-Do"];
+const tabs = ["Overview", "Maintenance", "To-Do"] as const;
+const maintenanceTabs = ["Vessel Maintenance", "Engine Maintenance"] as const;
+const categories = ["Repair", "Routine Maintenance", "Observation", "Admin"] as const;
+const statuses = ["Open Issue", "Scheduled", "Done"] as const;
 
-const systems = [
-  "Port Outboard",
-  "Starboard Outboard",
-  "Sponsons",
-  "Speed Tube",
-  "Hull",
-  "Deck",
+const vesselSystems = [
+  "Sponsons", "Speed Tube", "Hull", "Deck", "Fuel System", "Electrical",
+  "Helm / Controls", "Console", "Equipment", "Trailer", "Administrative",
+];
+
+const engineSystems = [
   "Fuel System",
+  "Cooling System",
+  "Engine Oil",
   "Electrical",
-  "Helm / Controls",
-  "Console",
-  "Equipment",
-  "Trailer",
-  "Administrative",
+  "Ignition",
+  "Sensors & ECU",
+  "Trim & Tilt",
+  "Midsection",
+  "Lower Unit",
+  "Propeller",
+  "Tiller",
+  "Exterior & Cowling",
 ];
 
 const MAINTENANCE_PHOTO_BUCKET = "maintenance-photos";
 
-function maintenancePhotoUrl(path: string) {
-  return supabase.storage
-    .from(MAINTENANCE_PHOTO_BUCKET)
-    .getPublicUrl(path).data.publicUrl;
-}
+type Category = typeof categories[number];
+type Status = typeof statuses[number];
+type TargetType = "boat" | "engine";
 
-function safeFileName(fileName: string) {
-  return fileName
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-}
-
-type Todo = {
+type Engine = {
   id: number;
-  pinId?: number | null;
-
-  title: string;
-  system: string;
-  item: string;
-  category: string;
-  dueDate: string;
-  status: "Open Issue" | "Monitor" | "Scheduled";
-  notes: string;
+  engine_code: string;
+  boat_id: number | null;
+  position: "Single" | "Port" | "Starboard" | "Other";
+  make: string | null;
+  model: string | null;
+  year: string | null;
+  serial_number: string | null;
+  horsepower: number | null;
+  engine_url: string | null;
+  schematic: string | null;
+  lifetime_hours: number;
+  service_hours: number;
+  service_interval_hours: number;
+  notes: string | null;
 };
-
-type Category =
-  | "Repair"
-  | "Maintenance"
-  | "Inspection"
-  | "Admin";
-
-type Status =
-  | "Open"
-  | "Monitor"
-  | "Done"
-  | "Scheduled";
 
 type Pin = {
   id: number;
   x: number;
   y: number;
   name: string;
+  system: string;
 };
 
 type MaintenanceRecord = {
   id: number;
-  boatId: number;
-  pinId: number | null;
-
+  target_type: TargetType;
+  boat_id: number | null;
+  engine_id: number | null;
+  boat_id_at_time: number | null;
+  pin_id: number | null;
+  engine_pin_id: number | null;
   title: string;
-  item: string;
-  description?: string;
+  item: string | null;
+  description: string | null;
   system: string;
-
   category: Category;
   status: Status;
-
-  dateCreated: string;
-  dueDate?: string;
-  completedDate?: string;
-
-  completedBy?: string;
-  workOrder?: string;
-
+  date_created: string;
+  due_date: string | null;
+  completed_date: string | null;
+  completed_by: string | null;
+  work_order: string | null;
   notes: string;
-
-  attachments?: string[];
-  cost?: number;
+  attachments: string[];
+  cost: number | null;
 };
+
+type EditorState = {
+  record_id: number | null;
+  target_type: TargetType;
+  engine_id: number | null;
+  pin_id: number | null;
+  engine_pin_id: number | null;
+  title: string;
+  item: string;
+  description: string;
+  system: string;
+  category: Category;
+  status: Status;
+  date_created: string;
+  due_date: string;
+  completed_date: string;
+  completed_by: string;
+  work_order: string;
+  notes: string;
+  cost: string;
+  attachments: string[];
+};
+
+const emptyEditor = (target_type: TargetType = "boat", system?: string, engine_id: number | null = null): EditorState => ({
+  record_id: null,
+  target_type,
+  engine_id,
+  pin_id: null,
+  engine_pin_id: null,
+  title: "",
+  item: "",
+  description: "",
+  system: system ?? (target_type === "engine" ? engineSystems[0] : vesselSystems[0]),
+  category: "Repair",
+  status: "Open Issue",
+  date_created: new Date().toISOString().slice(0, 10),
+  due_date: "",
+  completed_date: "",
+  completed_by: "",
+  work_order: "",
+  notes: "",
+  cost: "",
+  attachments: [],
+});
+
+function safeFileName(fileName: string) {
+  return fileName.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+function maintenancePhotoUrl(path: string) {
+  return supabase.storage.from(MAINTENANCE_PHOTO_BUCKET).getPublicUrl(path).data.publicUrl;
+}
 
 export default function BoatPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
-  const boatId = Number(id);
+  const boat_id = Number(id);
   const [boat, setBoat] = useState<Boat | null>(null);
-  const [boatLoaded, setBoatLoaded] = useState(false);
-  const [boatError, setBoatError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState("Overview");
+  const [engines, setEngines] = useState<Engine[]>([]);
+  const [records, setRecords] = useState<MaintenanceRecord[]>([]);
+  const [activeTab, setActiveTab] = useState<typeof tabs[number]>("Overview");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
+  async function loadAll() {
+    if (!Number.isInteger(boat_id)) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const loadedBoat = await fetchBoat(supabase, boat_id);
+      if (!loadedBoat) throw new Error("Boat not found");
+      setBoat(loadedBoat);
 
-    async function loadBoat() {
-      if (!Number.isInteger(boatId)) {
-        setBoatLoaded(true);
-        return;
-      }
+      const engineResult = await supabase.from("engines").select("*").eq("boat_id", boat_id).order("position");
+      if (engineResult.error) throw engineResult.error;
+      const loadedEngines = (engineResult.data ?? []) as Engine[];
+      setEngines(loadedEngines);
 
-      try {
-        const loadedBoat = await fetchBoat(supabase, boatId);
-        if (!cancelled) setBoat(loadedBoat);
-      } catch (error) {
-        console.error("Could not load boat:", error);
-        if (!cancelled) setBoatError("The vessel could not be loaded.");
-      } finally {
-        if (!cancelled) setBoatLoaded(true);
-      }
-    }
-
-    void loadBoat();
-    return () => {
-      cancelled = true;
-    };
-  }, [boatId]);
-
-  const [todos, setTodos] = useState<Todo[]>([]);
-  const [todosLoaded, setTodosLoaded] = useState(false);
-
-  useEffect(() => {
-    if (!boat) return;
-
-    const boatId = boat.id;
-    let cancelled = false;
-
-    async function loadTodos() {
-      const { data, error } = await supabase
-        .from("todos")
-        .select("*")
-        .eq("boat_id", boatId)
-        .order("created_at", { ascending: false });
-
-      if (error) {
-        console.error("Could not load To-Do items:", {
-          message: error.message,
-          details: error.details,
-          hint: error.hint,
-          code: error.code,
-        });
-        if (!cancelled) setTodosLoaded(true);
-        return;
-      }
-
-      const loadedTodos: Todo[] = (data ?? []).map((item) => ({
-        id: item.id,
-        pinId: item.pin_id,
-        title: item.title,
-        system: item.system ?? "",
-        item: item.item ?? "",
-        category: item.category ?? "Repair",
-        dueDate: item.due_date ?? "",
-        status: item.status,
-        notes: item.notes ?? "",
-      }));
-
-      if (!cancelled) {
-        setTodos(loadedTodos);
-        setTodosLoaded(true);
-      }
-    }
-
-    void loadTodos();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [boat]);
-
-  const [maintenanceRecords, setMaintenanceRecords] =
-    useState<MaintenanceRecord[]>([]);
-
-  useEffect(() => {
-    if (!boat) return;
-
-    const boatId = boat.id;
-    let cancelled = false;
-
-    async function loadMaintenanceRecords() {
-      const { data, error } = await supabase
+      const boatRecordsResult = await supabase
         .from("maintenance_records")
         .select("*")
-        .eq("boat_id", boatId)
-        .order("completed_date", {
-          ascending: false,
-          nullsFirst: false,
-        })
-        .order("created_at", {
-          ascending: false,
-        });
+        .eq("boat_id", boat_id)
+        .eq("target_type", "boat")
+        .order("date_created", { ascending: false });
+      if (boatRecordsResult.error) throw boatRecordsResult.error;
 
-      if (error) {
-        console.error("Could not load maintenance records:", {
-          message: error.message,
-          details: error.details,
-          hint: error.hint,
-          code: error.code,
-        });
-
-        return;
+      let engineRecords: MaintenanceRecord[] = [];
+      const engineIds = loadedEngines.map((engine) => engine.id);
+      if (engineIds.length) {
+        const engineRecordsResult = await supabase
+          .from("maintenance_records")
+          .select("*")
+          .in("engine_id", engineIds)
+          .eq("target_type", "engine")
+          .order("date_created", { ascending: false });
+        if (engineRecordsResult.error) throw engineRecordsResult.error;
+        engineRecords = (engineRecordsResult.data ?? []) as MaintenanceRecord[];
       }
 
-      const loadedRecords: MaintenanceRecord[] = (data ?? []).map(
-        (record) => ({
-          id: record.id,
-          boatId: record.boat_id,
-          pinId: record.pin_id,
-
-          title: record.title,
-          item: record.item ?? "",
-          description: record.description ?? undefined,
-          system: record.system ?? "",
-
-          category: record.category as Category,
-          status: record.status as Status,
-
-          dateCreated: record.date_created,
-          dueDate: record.due_date ?? undefined,
-          completedDate: record.completed_date ?? undefined,
-
-          completedBy: record.completed_by ?? undefined,
-          workOrder: record.work_order ?? undefined,
-
-          notes: record.notes ?? "",
-
-          attachments: record.attachments ?? [],
-          cost:
-            record.cost === null || record.cost === undefined
-              ? undefined
-              : Number(record.cost),
-        })
-      );
-
-      if (!cancelled) {
-        setMaintenanceRecords(loadedRecords);
-      }
+      setRecords([...(boatRecordsResult.data ?? []), ...engineRecords] as MaintenanceRecord[]);
+    } catch (e) {
+      console.error(e);
+      setError(e instanceof Error ? e.message : "Could not load vessel data.");
+    } finally {
+      setLoading(false);
     }
-
-    void loadMaintenanceRecords();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [boat]);
-
-  if (!boatLoaded) {
-    return <main style={{ padding: "2rem", color: "#f8fafc" }}>Loading vessel…</main>;
   }
 
-  if (boatError) {
-    return <main style={{ padding: "2rem", color: "#fca5a5" }}>{boatError}</main>;
-  }
+  // eslint-disable-next-line react-hooks/set-state-in-effect, react-hooks/exhaustive-deps
+  useEffect(() => { void loadAll(); }, [boat_id]);
 
-  if (!boat) return <main style={{ padding: "2rem" }}>Boat not found.</main>;
+  if (loading) return <main className="page-shell" style={{ color: "#f8fafc" }}>Loading vessel…</main>;
+  if (error) return <main className="page-shell" style={{ color: "#fca5a5" }}>{error}</main>;
+  if (!boat) return <main className="page-shell">Boat not found.</main>;
 
-  const dueSummary = summarizeDueDates(todos);
-
-  async function markDone(todoId: number) {
-    const { error } = await supabase
-      .from("todos")
-      .delete()
-      .eq("id", todoId);
-
-    if (error) {
-      console.error("Could not complete To-Do item:", error);
-      alert("The To-Do item could not be completed.");
-      return;
-    }
-
-    setTodos((current) =>
-      current.filter((item) => item.id !== todoId)
-    );
-  }
-
-  async function deleteMaintenance(id: number) {
-    const record = maintenanceRecords.find(
-      (maintenanceRecord) => maintenanceRecord.id === id
-    );
-
-    const { error } = await supabase
-      .from("maintenance_records")
-      .delete()
-      .eq("id", id);
-
-    if (error) {
-      console.error("Could not delete maintenance record:", {
-        message: error.message,
-        details: error.details,
-        hint: error.hint,
-        code: error.code,
-      });
-
-      alert(`The maintenance record could not be deleted:\n\n${error.message}`);
-      return;
-    }
-
-    const attachments = record?.attachments ?? [];
-
-    if (attachments.length > 0) {
-      const { error: storageError } = await supabase.storage
-        .from(MAINTENANCE_PHOTO_BUCKET)
-        .remove(attachments);
-
-      if (storageError) {
-        console.error("Maintenance record deleted, but photos could not be removed:", {
-          message: storageError.message,
-        });
-      }
-    }
-
-    setMaintenanceRecords((current) =>
-      current.filter(
-        (maintenanceRecord) => maintenanceRecord.id !== id
-      )
-    );
-  }
-
-  async function addMaintenance(record: MaintenanceRecord) {
-    const { data, error } = await supabase
-      .from("maintenance_records")
-      .insert({
-        boat_id: record.boatId,
-        pin_id: record.pinId,
-
-        title: record.title,
-        item: record.item || null,
-        description: record.description || null,
-        system: record.system,
-
-        category: record.category,
-        status: record.status,
-
-        date_created: record.dateCreated,
-        due_date: record.dueDate || null,
-        completed_date: record.completedDate || null,
-
-        completed_by: record.completedBy || null,
-        work_order: record.workOrder || null,
-
-        notes: record.notes,
-        attachments: record.attachments ?? [],
-        cost: record.cost ?? null,
-      })
-      .select()
-      .single();
-
-    if (error) {
-      console.error("Could not save maintenance record:", {
-        message: error.message,
-        details: error.details,
-        hint: error.hint,
-        code: error.code,
-      });
-
-      alert(`The maintenance record could not be saved:\n\n${error.message}`);
-      throw error;
-    }
-
-    const savedRecord: MaintenanceRecord = {
-      id: data.id,
-      boatId: data.boat_id,
-      pinId: data.pin_id,
-
-      title: data.title,
-      item: data.item ?? "",
-      description: data.description ?? undefined,
-      system: data.system ?? "",
-
-      category: data.category as Category,
-      status: data.status as Status,
-
-      dateCreated: data.date_created,
-      dueDate: data.due_date ?? undefined,
-      completedDate: data.completed_date ?? undefined,
-
-      completedBy: data.completed_by ?? undefined,
-      workOrder: data.work_order ?? undefined,
-
-      notes: data.notes ?? "",
-
-      attachments: data.attachments ?? [],
-      cost:
-        data.cost === null || data.cost === undefined
-          ? undefined
-          : Number(data.cost),
-    };
-
-    setMaintenanceRecords((current) => [
-      savedRecord,
-      ...current,
-    ]);
-  }
-
-  function exportMaintenance() {
-    const blob = new Blob([JSON.stringify(maintenanceRecords, null, 2)], {
-      type: "application/json",
-    });
-
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${boat?.name ?? "boat"}-maintenance-log.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-  }
+  const activeItems = records.filter((record) => record.status !== "Done");
+  const dueSummary = summarizeDueDates(activeItems);
+  const serviceDue = engines.filter(isEngineServiceDue);
 
   return (
     <main className="page-shell" style={{ color: "#f8fafc" }}>
-      <a href="/" style={{ color: "#38bdf8", textDecoration: "none" }}>
-        ← Back to Fleet
-      </a>
-
+      <Link href="/" style={{ color: "#38bdf8", textDecoration: "none" }}>← Back to Fleet</Link>
       <h1 style={{ fontSize: "3rem", margin: "1rem 0 0" }}>{boat.name}</h1>
-      <p style={{ fontSize: "1.25rem", marginTop: ".25rem" }}>{boat.type}</p>
+      <p style={{ fontSize: "1.1rem", margin: ".25rem 0" }}>{boat.boat_code} · {boat.type}</p>
 
       <div className="boat-status-row">
         <span style={badgeStyle(boat.status === "Active" ? "#166534" : "#475569")}>{boat.status}</span>
-        {dueSummary.overdue > 0 && (
-          <span style={badgeStyle("#991b1b")}>
-            {dueSummary.overdue} overdue
-          </span>
-        )}
-        {dueSummary.dueSoon > 0 && (
-          <span style={badgeStyle("#92400e")}>
-            {dueSummary.dueSoon} due within {DUE_SOON_DAYS} days
-          </span>
-        )}
-        {dueSummary.overdue === 0 && dueSummary.dueSoon === 0 && (
-          <span style={badgeStyle("#1e3a5f")}>Nothing due soon</span>
-        )}
+        {dueSummary.overdue > 0 && <span style={badgeStyle("#991b1b")}>{dueSummary.overdue} overdue</span>}
+        {dueSummary.dueSoon > 0 && <span style={badgeStyle("#92400e")}>{dueSummary.dueSoon} due within {DUE_SOON_DAYS} days</span>}
+        {serviceDue.length > 0 && <span style={badgeStyle("#991b1b")}>{serviceDue.length} engine service {serviceDue.length === 1 ? "due" : "items due"}</span>}
+        {dueSummary.overdue === 0 && dueSummary.dueSoon === 0 && serviceDue.length === 0 && <span style={badgeStyle("#1e3a5f")}>Nothing due soon</span>}
       </div>
 
-<nav className="boat-tabs">
-  {tabs.map((tab) => (
-    <button
-      key={tab}
-      type="button"
-      onClick={() => setActiveTab(tab)}
-      className={`boat-tab ${activeTab === tab ? "boat-tab-active" : ""}`}
-    >
-      {tab === "Maintenance Log" ? "Maintenance" : tab}
-    </button>
-  ))}
-</nav>
+      <nav className="boat-tabs">
+        {tabs.map((tab) => <button key={tab} type="button" onClick={() => setActiveTab(tab)} className={`boat-tab ${activeTab === tab ? "boat-tab-active" : ""}`}>{tab}</button>)}
+      </nav>
 
-      {activeTab === "Overview" && <Overview boat={boat} />}
-      {activeTab === "Maintenance Log" && (
-        <MaintenanceLog
-          boatId={boat.id}
-          todos={todos}
-          schematic={boat.schematic}
-          maintenanceRecords={maintenanceRecords}
-          addMaintenance={addMaintenance}
-          deleteMaintenance={deleteMaintenance}
-          exportMaintenance={exportMaintenance}
-        />
-      )}
-      {activeTab === "To-Do" && (
-        <TodoList
-          boatId={boat.id}
-          todos={todos}
-          setTodos={setTodos}
-          markDone={markDone}
-        />
-      )}
+      {activeTab === "Overview" && <Overview boat={boat} engines={engines} onChanged={loadAll} />}
+      {activeTab === "Maintenance" && <MaintenanceLog boat={boat} engines={engines} records={records} onChanged={loadAll} />}
+      {activeTab === "To-Do" && <TodoView boat={boat} engines={engines} records={records} onChanged={loadAll} />}
     </main>
   );
 }
 
-function Overview({
-  boat,
-}: {
-  boat: Boat;
-}) {
+function Overview({ boat, engines, onChanged }: { boat: Boat; engines: Engine[]; onChanged: () => Promise<void> }) {
   return (
     <section style={panelStyle}>
       <div className="responsive-grid">
-        {/* Photo and Title */}
         <div>
-          <img
-            src={boat.photo ?? "/placeholder.jpg"}
-            alt={boat.name}
-            style={{
-              width: "100%",
-              borderRadius: "16px",
-              display: "block",
-              marginBottom: "1rem",
-            }}
-          />
-
-
+          {boat.photo ? <img src={boat.photo} alt={boat.name} style={{ width: "100%", borderRadius: "16px", display: "block" }} /> : <div style={cardStyle}>No vessel photo entered.</div>}
         </div>
-
-        {/* Details Cards */}
-        <div
-          style={{
-            display: "grid",
-            gap: "1rem",
-          }}
-        >
+        <div style={{ display: "grid", gap: "1rem" }}>
           <div style={infoCardStyle}>
             <h3 style={{ marginTop: 0 }}>Vessel Details</h3>
-
+            <InfoRow label="Boat ID" value={boat.boat_code} />
             <InfoRow label="Make" value={boat.make ?? "TBD"} />
             <InfoRow label="Model" value={boat.model ?? "TBD"} />
             <InfoRow label="Year" value={boat.year ?? "TBD"} />
             <InfoRow label="Length" value={boat.length ?? "TBD"} />
-            <InfoRow label="Hull Number" value={boat.hullNumber ?? "TBD"} />
+            <InfoRow label="Hull Number" value={boat.hull_number ?? "TBD"} />
             <InfoRow label="Registration" value={boat.registration ?? "TBD"} />
-          </div>
-
-          <div style={infoCardStyle}>
-            <h3 style={{ marginTop: 0 }}>Systems</h3>
-
-
-            <InfoRow label="Engines"
-              value={
-                boat.engineUrl ? (
-                  <a
-                    href={boat.engineUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    style={{ color: "#60a5fa" }}
-                  >
-                    {boat.engines}
-                  </a>
-                ) : (
-                  boat.engines ?? "TBD"
-                )
-              }
-            />
-            <InfoRow label="Fuel Capacity" value={boat.fuelCapacity ?? "TBD"} />
-            <InfoRow label="Battery Type" value={boat.batteryType ?? "TBD"} />
+            <InfoRow label="Fuel Capacity" value={boat.fuel_capacity ?? "TBD"} />
+            <InfoRow label="Battery Type" value={boat.battery_type ?? "TBD"} />
             <InfoRow label="Location" value={boat.location} />
           </div>
         </div>
       </div>
 
-      <div
-        style={{
-          marginTop: "1.5rem",
-          background: "#020617",
-          border: "1px solid #334155",
-          borderRadius: "12px",
-          padding: "1rem",
-        }}
-      >
+      <h2 style={{ marginTop: "1.5rem" }}>Installed Engines</h2>
+      {engines.length ? <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: "1rem" }}>
+        {engines.map((engine) => <EngineCard key={engine.id} engine={engine} onChanged={onChanged} />)}
+      </div> : <div style={cardStyle}>No engines are currently assigned to this boat. Assign them in Supabase by setting <code>engines.boat_id</code> and <code>position</code>.</div>}
+
+      <div style={{ ...cardStyle, marginTop: "1.5rem" }}>
         <h3 style={{ marginTop: 0 }}>Notes</h3>
-
-        <p style={{ color: "#cbd5e1" }}>
-          {boat.notes ?? "No notes entered."}
-        </p>
+        <p style={{ color: "#cbd5e1", marginBottom: 0 }}>{boat.notes ?? "No notes entered."}</p>
       </div>
     </section>
   );
 }
 
-function TodoList({
-  boatId,
-  todos,
-  setTodos,
-  markDone,
-}: {
-  boatId: number;
-  todos: Todo[];
-  setTodos: React.Dispatch<React.SetStateAction<Todo[]>>;
-  markDone: (todoId: number) => void;
-}) {
-  const [form, setForm] = useState<{
-    title: string;
-    system: string;
-    item: string;
-    category: Category;
-    dueDate: string;
-    status: Todo["status"];
-    notes: string;
-  }>({
-    title: "",
-    system: systems[0],
-    item: "",
-    category: "Repair",
-    dueDate: "",
-    status: "Open Issue",
-    notes: "",
-  });
+function EngineCard({ engine, onChanged }: { engine: Engine; onChanged: () => Promise<void> }) {
+  const [lifetime_hours, setLifetime] = useState(String(engine.lifetime_hours ?? 0));
+  const [service_hours, setService] = useState(String(engine.service_hours ?? 0));
+  const serviceDue = isEngineServiceDue({ ...engine, service_hours: Number(service_hours) });
 
-  const statusOrder: Todo["status"][] = [
-    "Open Issue",
-    "Monitor",
-    "Scheduled",
-  ];
-
-  const sortedByStatus = [...todos].sort((a, b) => {
-    const statusCompare =
-      statusOrder.indexOf(a.status) -
-      statusOrder.indexOf(b.status);
-
-    if (statusCompare !== 0) return statusCompare;
-
-    if (!a.dueDate && !b.dueDate) return 0;
-    if (!a.dueDate) return 1;
-    if (!b.dueDate) return -1;
-
-    return a.dueDate.localeCompare(b.dueDate);
-  });
-
-  const upcoming = [...todos]
-    .filter((item) => item.dueDate)
-    .sort((a, b) => a.dueDate.localeCompare(b.dueDate))
-    .slice(0, 5);
-
-  function updateForm<K extends keyof typeof form>(
-    field: K,
-    value: (typeof form)[K]
-  ) {
-    setForm((current) => ({
-      ...current,
-      [field]: value,
-    }));
+  async function saveHours(reset = false) {
+    const values = reset ? { lifetime_hours: Number(lifetime_hours) || 0, service_hours: 0 } : { lifetime_hours: Number(lifetime_hours) || 0, service_hours: Number(service_hours) || 0 };
+    const { error } = await supabase.from("engines").update(values).eq("id", engine.id);
+    if (error) return alert(`Could not save engine hours:\n\n${error.message}`);
+    if (reset) setService("0");
+    await onChanged();
   }
 
-  async function addTodo() {
-    if (!form.title.trim()) {
-      alert("Enter a title for the To-Do item.");
-      return;
-    }
-
-    const { data, error } = await supabase
-      .from("todos")
-      .insert({
-        boat_id: boatId,
-        pin_id: null,
-        title: form.title.trim(),
-        system: form.system,
-        item: form.item.trim(),
-        category: form.category,
-        due_date: form.dueDate || null,
-        status: form.status,
-        notes: form.notes.trim(),
-      })
-      .select()
-      .single();
-
-    if (error) {
-      console.error("Could not add To-Do item:", {
-        message: error.message,
-        details: error.details,
-        hint: error.hint,
-        code: error.code,
-      });
-      alert(`The To-Do item could not be saved:\n\n${error.message}`);
-      return;
-    }
-
-    const newTodo: Todo = {
-      id: data.id,
-      pinId: data.pin_id,
-      title: data.title,
-      system: data.system ?? "",
-      item: data.item ?? "",
-      category: data.category ?? "Repair",
-      dueDate: data.due_date ?? "",
-      status: data.status,
-      notes: data.notes ?? "",
-    };
-
-    setTodos((current) => [newTodo, ...current]);
-
-    setForm({
-      title: "",
-      system: systems[0],
-      item: "",
-      category: "Repair",
-      dueDate: "",
-      status: "Open Issue",
-      notes: "",
-    });
-  }
-
-  async function updateTodoStatus(
-    todoId: number,
-    newStatus: Todo["status"]
-  ) {
-    const { error } = await supabase
-      .from("todos")
-      .update({
-        status: newStatus,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", todoId);
-
-    if (error) {
-      console.error("Could not update To-Do status:", error);
-      alert(`The status could not be updated:\n\n${error.message}`);
-      return;
-    }
-
-    setTodos((current) =>
-      current.map((todo) =>
-        todo.id === todoId
-          ? { ...todo, status: newStatus }
-          : todo
-      )
-    );
-  }
-
-  return (
-    <section style={panelStyle}>
-      <h2>To-Do</h2>
-
-      <div className="responsive-grid">
-        <div>
-          <div
-            style={{
-              display: "grid",
-              gap: ".75rem",
-              marginBottom: "1.5rem",
-              maxWidth: "700px",
-              padding: "1rem",
-              background: "#020617",
-              border: "1px solid #334155",
-              borderRadius: "12px",
-            }}
-          >
-            <h3 style={{ marginTop: 0 }}>Add To-Do Item</h3>
-
-            <label>
-              <div style={labelStyle}>Title</div>
-              <input
-                value={form.title}
-                onChange={(event) =>
-                  updateForm("title", event.target.value)
-                }
-                placeholder="What needs to be done?"
-                style={inputStyle}
-              />
-            </label>
-
-            <label>
-              <div style={labelStyle}>System</div>
-              <select
-                value={form.system}
-                onChange={(event) =>
-                  updateForm("system", event.target.value)
-                }
-                style={inputStyle}
-              >
-                {systems.map((system) => (
-                  <option key={system} value={system}>
-                    {system}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label>
-              <div style={labelStyle}>Item</div>
-              <input
-                value={form.item}
-                onChange={(event) =>
-                  updateForm("item", event.target.value)
-                }
-                placeholder="O2 Sensor, battery charger, bow cleat..."
-                style={inputStyle}
-              />
-            </label>
-
-            <label>
-              <div style={labelStyle}>Category</div>
-              <select
-                value={form.category}
-                onChange={(event) =>
-                  updateForm(
-                    "category",
-                    event.target.value as Category
-                  )
-                }
-                style={inputStyle}
-              >
-                <option value="Repair">Repair</option>
-                <option value="Maintenance">Maintenance</option>
-                <option value="Inspection">Inspection</option>
-                <option value="Admin">Admin</option>
-              </select>
-            </label>
-
-            <label>
-              <div style={labelStyle}>Due Date</div>
-              <input
-                type="date"
-                value={form.dueDate}
-                onChange={(event) =>
-                  updateForm("dueDate", event.target.value)
-                }
-                style={inputStyle}
-              />
-            </label>
-
-            <label>
-              <div style={labelStyle}>Status</div>
-              <select
-                value={form.status}
-                onChange={(event) =>
-                  updateForm(
-                    "status",
-                    event.target.value as Todo["status"]
-                  )
-                }
-                style={inputStyle}
-              >
-                <option value="Open Issue">Needs Attention</option>
-                <option value="Monitor">Monitor</option>
-                <option value="Scheduled">Scheduled</option>
-              </select>
-            </label>
-
-            <label>
-              <div style={labelStyle}>Notes</div>
-              <textarea
-                value={form.notes}
-                onChange={(event) =>
-                  updateForm("notes", event.target.value)
-                }
-                placeholder="Details, part numbers, symptoms, instructions..."
-                style={{
-                  ...inputStyle,
-                  minHeight: "100px",
-                }}
-              />
-            </label>
-
-            <button
-              type="button"
-              onClick={addTodo}
-              style={buttonStyle}
-            >
-              Add To-Do Item
-            </button>
-          </div>
-
-          <h3>To-Do Items</h3>
-
-          <div style={{ display: "grid", gap: ".75rem" }}>
-            {sortedByStatus.length ? (
-              sortedByStatus.map((item) => (
-                <div
-                  key={item.id}
-                  style={{
-                    border: "1px solid #334155",
-                    borderRadius: "12px",
-                    padding: "1rem",
-                    background: "#020617",
-                  }}
-                >
-                  <h3 style={{ marginTop: 0 }}>
-                    {statusDot(item.status)} {item.title}
-                  </h3>
-
-                  <p style={{ color: "#cbd5e1" }}>
-                    {item.system}
-                    {item.item ? ` · ${item.item}` : ""}
-                  </p>
-
-                  <p>
-                    {item.category}
-                    {item.dueDate
-                      ? ` · Due ${formatDate(item.dueDate)}`
-                      : " · No due date"}
-                  </p>
-
-                  <label
-                    style={{
-                      display: "block",
-                      marginBottom: ".75rem",
-                      maxWidth: "220px",
-                    }}
-                  >
-                    <div style={labelStyle}>Status</div>
-
-                    <select
-                      value={item.status}
-                      onChange={(event) =>
-                        void updateTodoStatus(
-                          item.id,
-                          event.target.value as Todo["status"]
-                        )
-                      }
-                      style={{
-                        ...inputStyle,
-                        width: "100%",
-                      }}
-                    >
-                      <option value="Open Issue">Needs Attention</option>
-                      <option value="Monitor">Monitor</option>
-                      <option value="Scheduled">Scheduled</option>
-                    </select>
-                  </label>
-
-                  {item.notes && (
-                    <p style={{ color: "#cbd5e1" }}>
-                      {item.notes}
-                    </p>
-                  )}
-
-                  <button
-                    type="button"
-                    onClick={() => markDone(item.id)}
-                    style={buttonStyle}
-                  >
-                    Mark Done
-                  </button>
-                </div>
-              ))
-            ) : (
-              <div style={cardStyle}>
-                <p style={{ margin: 0 }}>
-                  No active To-Do items.
-                </p>
-              </div>
-            )}
-          </div>
-        </div>
-
-        <aside
-          style={{
-            border: "1px solid #334155",
-            borderRadius: "12px",
-            padding: "1rem",
-            background: "#020617",
-          }}
-        >
-          <h3 style={{ marginTop: 0 }}>Upcoming</h3>
-
-          {upcoming.length ? (
-            <div style={{ display: "grid", gap: ".75rem" }}>
-              {upcoming.map((item) => (
-                <div key={item.id}>
-                  <strong>{formatDate(item.dueDate)}</strong>
-                  <div>{item.title}</div>
-                  <div
-                    style={{
-                      color: "#94a3b8",
-                      fontSize: ".9rem",
-                    }}
-                  >
-                    {displayTodoStatus(item.status)}
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p style={{ color: "#94a3b8" }}>
-              No upcoming due dates.
-            </p>
-          )}
-        </aside>
+  return <div style={{ ...infoCardStyle, borderColor: serviceDue ? "#ef4444" : "#334155" }}>
+    <div style={{ display: "flex", justifyContent: "space-between", gap: "1rem", alignItems: "start" }}>
+      <div><h3 style={{ margin: 0 }}>{engine.position} Engine</h3><div style={{ color: "#94a3b8" }}>{engine.engine_code} · {[engine.make, engine.model].filter(Boolean).join(" ") || "Engine"}</div></div>
+      {serviceDue && <span style={badgeStyle("#991b1b")}>SERVICE DUE</span>}
+    </div>
+    <InfoRow label="Serial" value={engine.serial_number ?? "TBD"} />
+    <InfoRow label="Horsepower" value={engine.horsepower ? `${engine.horsepower} hp` : "TBD"} />
+    <div style={{ marginTop: ".75rem" }}>
+      <label><div style={labelStyle}>Lifetime Hours</div><input type="number" step="0.1" min="0" value={lifetime_hours} onChange={(e) => setLifetime(e.target.value)} style={inputStyle} /></label>
+      <label style={{ display: "block", marginTop: ".6rem" }}><div style={labelStyle}>Since Last Service</div><input type="number" step="0.1" min="0" value={service_hours} onChange={(e) => setService(e.target.value)} style={inputStyle} /></label>
+      <div style={{ color: serviceDue ? "#fca5a5" : "#94a3b8", marginTop: ".5rem" }}>Service interval: {engineServiceInterval(engine)} hrs</div>
+      <div style={{ display: "flex", gap: ".5rem", marginTop: ".75rem", flexWrap: "wrap" }}>
+        <button style={buttonStyle} onClick={() => void saveHours(false)}>Save Hours</button>
+        <button style={{ ...buttonStyle, background: "#475569" }} onClick={() => void saveHours(true)}>Reset Since Service</button>
       </div>
-    </section>
-  );
+    </div>
+  </div>;
 }
 
-function MaintenanceLog({
-  boatId,
-  schematic,
-  todos,
-  maintenanceRecords,
-  addMaintenance,
-  deleteMaintenance,
-  exportMaintenance,
-}: {
-  boatId: number;
-  schematic?: string;
-  todos: Todo[];
-  maintenanceRecords: MaintenanceRecord[];
-  addMaintenance: (record: MaintenanceRecord) => Promise<void>;
-  deleteMaintenance: (id: number) => Promise<void>;
-  exportMaintenance: () => void;
-}){
-  const [pins, setPins] = useState<Pin[]>([]);
-  const [selectedPinId, setSelectedPinId] = useState<number | null>(null);
-  const [placingPin, setPlacingPin] = useState(false);
-  const [showAddMaintenance, setShowAddMaintenance] = useState(false);
-  const [draftPinId, setDraftPinId] = useState<number | null>(null);
+function MaintenanceLog({ boat, engines, records, onChanged }: { boat: Boat; engines: Engine[]; records: MaintenanceRecord[]; onChanged: () => Promise<void> }) {
+  const [maintenanceTab, setMaintenanceTab] = useState<typeof maintenanceTabs[number]>("Vessel Maintenance");
   const [systemFilter, setSystemFilter] = useState("All");
+  const [boatPins, setBoatPins] = useState<Pin[]>([]);
+  const [enginePins, setEnginePins] = useState<Record<number, Pin[]>>({});
+  const [placing, setPlacing] = useState<{ target_type: TargetType; engine_id: number | null } | null>(null);
+  const [editor, setEditor] = useState<EditorState | null>(null);
+  const [selectedPhotoUrl, setSelectedPhotoUrl] = useState<string | null>(null);
 
-  const [form, setForm] = useState<{
-    completedDate: string;
-    completedBy: string;
-    category: Category;
-    system: string;
-    title: string;
-    item: string;
-    notes: string;
-    attachments: string[];
-  }>({
-    completedDate: "",
-    completedBy: "",
-    category: "Maintenance",
-    system: systems[0],
-    title: "",
-    item: "",
-    notes: "",
-    attachments: [],
-  });
+  const targetType: TargetType = maintenanceTab === "Vessel Maintenance" ? "boat" : "engine";
+  const baseSystems = targetType === "boat" ? vesselSystems : engineSystems;
+  const tabRecords = records.filter((record) => record.target_type === targetType);
 
-  useEffect(() => {
-    let cancelled = false;
-
-    async function loadPins() {
-      const { data, error } = await supabase
-        .from("maintenance_pins")
-        .select("*")
-        .eq("boat_id", boatId)
-        .order("created_at", { ascending: true });
-
-      if (error) {
-        console.error("Could not load maintenance pins:", {
-          message: error.message,
-          details: error.details,
-          hint: error.hint,
-          code: error.code,
-        });
-
-        alert(`Maintenance pins could not be loaded:
-
-${error.message}`);
-        return;
+  async function loadPins() {
+    const boatResult = await supabase.from("maintenance_pins").select("*").eq("boat_id", boat.id).order("created_at");
+    if (!boatResult.error) setBoatPins((boatResult.data ?? []) as Pin[]);
+    if (engines.length) {
+      const engineResult = await supabase.from("engine_pins").select("*").in("engine_id", engines.map((engine) => engine.id)).order("created_at");
+      if (!engineResult.error) {
+        const grouped: Record<number, Pin[]> = {};
+        for (const pin of engineResult.data ?? []) (grouped[pin.engine_id] ??= []).push(pin as Pin);
+        setEnginePins(grouped);
       }
-
-      if (!cancelled) {
-        setPins(
-          (data ?? []).map((pin) => ({
-            id: pin.id,
-            x: Number(pin.x),
-            y: Number(pin.y),
-            name: pin.name ?? "",
-          }))
-        );
-      }
+    } else {
+      setEnginePins({});
     }
+  }
 
-    void loadPins();
+  const engineIdKey = engines.map((engine) => engine.id).join(",");
+  // eslint-disable-next-line react-hooks/set-state-in-effect, react-hooks/exhaustive-deps
+  useEffect(() => { void loadPins(); }, [boat.id, engineIdKey]);
 
-    return () => {
-      cancelled = true;
-    };
-  }, [boatId]);
+  function switchMaintenanceTab(tab: typeof maintenanceTabs[number]) {
+    setMaintenanceTab(tab);
+    setSystemFilter("All");
+    setPlacing(null);
+  }
 
-  const selectedPin =
-    pins.find((pin) => pin.id === selectedPinId) ?? null;
+  const systemOptions = useMemo(
+    () => Array.from(new Set(["All", ...baseSystems, ...tabRecords.map((record) => record.system).filter(Boolean)])),
+    [baseSystems, tabRecords],
+  );
+  const filteredRecords = systemFilter === "All" ? tabRecords : tabRecords.filter((record) => record.system === systemFilter);
 
-  const selectedHistory = selectedPin
-    ? maintenanceRecords.filter(
-      (record) => record.pinId === selectedPin.id
-    )
-    : [];
-
-  const filteredMaintenance =
-    systemFilter === "All"
-      ? maintenanceRecords
-      : maintenanceRecords.filter(
-        (record) => record.system === systemFilter
-      );
-
-  async function placePin(event: MouseEvent<HTMLDivElement>) {
-    if (!placingPin) return;
-
+  async function placePin(event: MouseEvent<HTMLDivElement>, target_type: TargetType, engine_id: number | null) {
+    if (!placing || placing.target_type !== target_type || placing.engine_id !== engine_id) return;
+    if (systemFilter === "All") return alert("Choose a System before placing a pin so the pin knows which system it belongs to.");
     const bounds = event.currentTarget.getBoundingClientRect();
-
     const x = ((event.clientX - bounds.left) / bounds.width) * 100;
     const y = ((event.clientY - bounds.top) / bounds.height) * 100;
 
-    const { data, error } = await supabase
-      .from("maintenance_pins")
-      .insert({
-        boat_id: boatId,
-        x,
-        y,
-        name: "",
-      })
-      .select()
-      .single();
-
-    if (error) {
-      console.error("Could not create maintenance pin:", {
-        message: error.message,
-        details: error.details,
-        hint: error.hint,
-        code: error.code,
-      });
-
-      alert(`The pin could not be saved:\n\n${error.message}`);
+    if (target_type === "boat") {
+      const { data, error } = await supabase.from("maintenance_pins").insert({ boat_id: boat.id, x, y, name: "", system: systemFilter }).select().single();
+      if (error) return alert(`Could not save pin:\n\n${error.message}`);
+      setPlacing(null);
+      await loadPins();
+      setEditor({ ...emptyEditor("boat", systemFilter), pin_id: data.id });
       return;
     }
 
-    const savedPin: Pin = {
-      id: data.id,
-      x: Number(data.x),
-      y: Number(data.y),
-      name: data.name ?? "",
-    };
-
-    setPins((currentPins) => [...currentPins, savedPin]);
-    setSelectedPinId(savedPin.id);
-    setDraftPinId(savedPin.id);
-    setPlacingPin(false);
-    setShowAddMaintenance(true);
+    const { data, error } = await supabase.from("engine_pins").insert({ engine_id, x, y, name: "", system: systemFilter }).select().single();
+    if (error) return alert(`Could not save pin:\n\n${error.message}`);
+    setPlacing(null);
+    await loadPins();
+    setEditor({ ...emptyEditor("engine", systemFilter, engine_id), engine_pin_id: data.id });
   }
 
-  async function saveMaintenance() {
-    if (!selectedPin) return;
-
-    if (!form.title.trim()) {
-      alert("Enter the maintenance task performed.");
-      return;
-    }
-
-    try {
-      await addMaintenance({
-        // Supabase will replace this temporary value.
-        id: 0,
-        boatId,
-        pinId: selectedPin.id,
-
-        title:
-          form.title.trim() ||
-          selectedPin.name ||
-          "Maintenance",
-
-        item: form.item.trim(),
-        description: undefined,
-
-        system: form.system,
-        category: form.category,
-        status: "Done",
-
-        dateCreated: new Date().toISOString().slice(0, 10),
-        completedDate: form.completedDate || undefined,
-        completedBy: form.completedBy.trim() || undefined,
-
-        notes: form.notes.trim(),
-        attachments: form.attachments,
-      });
-    } catch {
-      // addMaintenance already displays the Supabase error.
-      // Leave the form open so the information is not lost.
-      return;
-    }
-
-    setForm({
-      completedDate: "",
-      completedBy: "",
-      category: "Maintenance",
-      system: systems[0],
-      title: "",
-      item: "",
-      notes: "",
-      attachments: [],
-    });
-
-    setDraftPinId(null);
-    setShowAddMaintenance(false);
+  function startEdit(record: MaintenanceRecord) {
+    setEditor(toEditorState(record));
   }
 
-  async function cancelMaintenance() {
-    const attachmentsToRemove = [...form.attachments];
-
-    if (attachmentsToRemove.length > 0) {
-      const { error } = await supabase.storage
-        .from(MAINTENANCE_PHOTO_BUCKET)
-        .remove(attachmentsToRemove);
-
-      if (error) {
-        console.error("Could not remove cancelled maintenance photos:", error);
-      }
-    }
-
-    if (draftPinId !== null) {
-      const pinIdToDelete = draftPinId;
-
-      const { error } = await supabase
-        .from("maintenance_pins")
-        .delete()
-        .eq("id", pinIdToDelete);
-
-      if (error) {
-        console.error("Could not delete cancelled pin:", {
-          message: error.message,
-          details: error.details,
-          hint: error.hint,
-          code: error.code,
-        });
-
-        alert(`The cancelled pin could not be deleted:\n\n${error.message}`);
-        return;
-      }
-
-      setPins((currentPins) =>
-        currentPins.filter((pin) => pin.id !== pinIdToDelete)
-      );
-      setSelectedPinId(null);
-      setDraftPinId(null);
-    }
-
-    setForm({
-      completedDate: "",
-      completedBy: "",
-      category: "Maintenance",
-      system: systems[0],
-      title: "",
-      item: "",
-      notes: "",
-      attachments: [],
-    });
-    setShowAddMaintenance(false);
+  async function deleteRecord(record: MaintenanceRecord) {
+    if (!confirm(`Delete "${record.title}"?`)) return;
+    const { error } = await supabase.from("maintenance_records").delete().eq("id", record.id);
+    if (error) return alert(`Could not delete record:\n\n${error.message}`);
+    if (record.attachments?.length) await supabase.storage.from(MAINTENANCE_PHOTO_BUCKET).remove(record.attachments);
+    await onChanged();
   }
 
-  function updateSelectedPinName(name: string) {
-    if (!selectedPin) return;
-
-    const pinId = selectedPin.id;
-
-    setPins((currentPins) =>
-      currentPins.map((pin) =>
-        pin.id === pinId ? { ...pin, name } : pin
-      )
-    );
-
-    void supabase
-      .from("maintenance_pins")
-      .update({
-        name,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", pinId)
-      .then(({ error }) => {
-        if (error) {
-          console.error("Could not rename maintenance pin:", {
-            message: error.message,
-            details: error.details,
-            hint: error.hint,
-            code: error.code,
-          });
-        }
-      });
+  function exportCsv() {
+    const engineById = Object.fromEntries(engines.map((engine) => [engine.id, engine]));
+    const rows = filteredRecords.map((record) => ({
+      boat_code: boat.boat_code,
+      record_type: record.target_type === "engine" ? "Engine" : "Vessel",
+      engine_code: record.engine_id ? engineById[record.engine_id]?.engine_code ?? "" : "",
+      engine_position: record.engine_id ? engineById[record.engine_id]?.position ?? "" : "",
+      title: record.title,
+      item: record.item ?? "",
+      description: record.description ?? "",
+      system: record.system,
+      category: record.category,
+      status: record.status,
+      date_created: record.date_created,
+      due_date: record.due_date ?? "",
+      completed_date: record.completed_date ?? "",
+      completed_by: record.completed_by ?? "",
+      work_order: record.work_order ?? "",
+      cost: record.cost ?? "",
+      notes: record.notes ?? "",
+    }));
+    downloadCsv(`${boat.boat_code}-${targetType === "boat" ? "vessel" : "engine"}-maintenance.csv`, rows);
   }
 
-  const [photoUrls, setPhotoUrls] = useState<Record<string, string>>({});
-  const [selectedPhotoUrl, setSelectedPhotoUrl] = useState<string | null>(null);
-  const [uploadingPhotos, setUploadingPhotos] = useState(false);
-
-  useEffect(() => {
-    const paths = new Set(
-      maintenanceRecords.flatMap((record) => record.attachments ?? [])
-    );
-
-    form.attachments.forEach((path) => paths.add(path));
-
-    setPhotoUrls((current) => {
-      const next = { ...current };
-
-      paths.forEach((path) => {
-        if (!next[path]) {
-          next[path] = maintenancePhotoUrl(path);
-        }
-      });
-
-      return next;
-    });
-  }, [maintenanceRecords, form.attachments]);
-
-  async function addPhotos(event: ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(event.target.files ?? []);
-    event.target.value = "";
-
-    if (files.length === 0) return;
-
-    setUploadingPhotos(true);
-
-    const uploadedPaths: string[] = [];
-
-    try {
-      for (const file of files) {
-        const cleanName = safeFileName(file.name) || "photo";
-        const path = `${boatId}/${crypto.randomUUID()}-${cleanName}`;
-
-        const { error } = await supabase.storage
-          .from(MAINTENANCE_PHOTO_BUCKET)
-          .upload(path, file, {
-            cacheControl: "3600",
-            upsert: false,
-            contentType: file.type || undefined,
-          });
-
-        if (error) {
-          throw error;
-        }
-
-        uploadedPaths.push(path);
-      }
-
-      setForm((currentForm) => ({
-        ...currentForm,
-        attachments: [...currentForm.attachments, ...uploadedPaths],
-      }));
-
-      setPhotoUrls((current) => {
-        const next = { ...current };
-
-        uploadedPaths.forEach((path) => {
-          next[path] = maintenancePhotoUrl(path);
-        });
-
-        return next;
-      });
-    } catch (error) {
-      console.error("Could not upload maintenance photos:", error);
-
-      if (uploadedPaths.length > 0) {
-        await supabase.storage
-          .from(MAINTENANCE_PHOTO_BUCKET)
-          .remove(uploadedPaths);
-      }
-
-      alert(
-        `One or more photos could not be uploaded.\n\n${error instanceof Error ? error.message : "Unknown upload error"
-        }`
-      );
-    } finally {
-      setUploadingPhotos(false);
-    }
+  function addRecord() {
+    const selectedSystem = systemFilter === "All" ? baseSystems[0] : systemFilter;
+    if (targetType === "engine" && !engines.length) return alert("No engines are assigned to this vessel yet.");
+    setEditor(emptyEditor(targetType, selectedSystem, targetType === "engine" ? engines[0]?.id ?? null : null));
   }
 
-  return (
-    <section style={panelStyle}>
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "end",
-          gap: "1rem",
-          flexWrap: "wrap",
-        }}
-      >
-        <div>
-          <h2 style={{ marginBottom: ".35rem" }}>Maintenance Log</h2>
-          <div style={{ color: "#94a3b8", marginBottom: ".5rem" }}>
-            Select an existing pin or add a new pin.
-          </div>
-          <button
-            style={buttonStyle}
-            onClick={() => setPlacingPin(!placingPin)}
-          >
-            {placingPin ? "Cancel Pin Placement" : "Add Pin"}
-          </button>
-        </div>
+  return <section style={panelStyle}>
+    <nav className="maintenance-tabs" aria-label="Maintenance type">
+      {maintenanceTabs.map((tab) => <button key={tab} type="button" onClick={() => switchMaintenanceTab(tab)} className={`maintenance-tab ${maintenanceTab === tab ? "maintenance-tab-active" : ""}`}>{tab}</button>)}
+    </nav>
 
-      </div>
-
-      {placingPin && (
-        <p style={{ color: "#94a3b8" }}>
-          Click anywhere on the schematic to place a pin.
-        </p>
-      )}
-
-    <div className="responsive-grid">
-        <div
-          onClick={(event) => void placePin(event)}
-          style={{
-            position: "relative",
-            background: "#f8fafc",
-            borderRadius: "12px",
-            overflow: "hidden",
-            alignSelf: "start",
-            cursor: placingPin ? "crosshair" : "default",
-          }}
-        >
-          <img
-            src={schematic}
-            alt="Schematic"
-            style={{
-              width: "100%",
-              display: "block",
-              pointerEvents: "none",
-            }}
-          />
-
-          {pins.map((pin) => {
-            const relatedTodos = todos.filter(
-              (todo) => todo.pinId === pin.id
-            );
-
-            const pinStatus = getPinStatus(relatedTodos);
-
-            return (
-              <button
-                key={pin.id}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  setSelectedPinId(pin.id);
-                  setShowAddMaintenance(false);
-                }}
-                style={pinStyle(
-                  pin.x,
-                  pin.y,
-                  statusColor(pinStatus),
-                  pin.id === selectedPinId
-                )}
-                title={pin.name}
-              >
-                {pin.id === selectedPinId ? "●" : "•"}
-              </button>
-            );
-          })}
-        </div>
-
-        <aside style={cardStyle}>
-          {selectedPin ? (
-            <>
-              <h3
-                style={{
-                  fontSize: "1.4rem",
-                  marginTop: 0,
-                  marginBottom: "1rem",
-                  borderBottom: "1px solid #334155",
-                  paddingBottom: ".75rem",
-                }}
-              >
-                {selectedPin.name ? `📍 ${selectedPin.name}` : "Maintenance Location"}
-              </h3>
-
-              <h4
-                style={{
-                  marginTop: "1.5rem",
-                  marginBottom: ".5rem",
-                  fontSize: "1rem",
-                  color: "#94a3b8",
-                  textTransform: "uppercase",
-                  letterSpacing: "1px",
-                }}
-              >
-                🛠 Maintenance History
-              </h4>
-
-              {selectedHistory.length ? (
-                <div style={{ display: "grid", gap: ".75rem" }}>
-                  {selectedHistory.map((record) => (
-                    <div
-                      key={record.id}
-                      style={{
-                        border: "1px solid #334155",
-                        borderRadius: "8px",
-                        padding: ".75rem",
-                        background: "#0f172a",
-                      }}
-                    >
-                      <div
-                        style={{
-                          color: "#94a3b8",
-                          fontSize: ".85rem",
-                        }}
-                      >
-                        {formatDate(record.completedDate ?? "")}
-                      </div>
-
-                      <div
-                        style={{
-                          fontWeight: 700,
-                          marginTop: ".25rem",
-                        }}
-                      >
-                        {record.title}
-                      </div>
-
-                      <div
-                        style={{
-                          color: "#94a3b8",
-                          fontSize: ".9rem",
-                          marginTop: ".25rem",
-                        }}
-                      >
-                        {record.system} · {record.category}
-                        {record.completedBy ? ` · ${record.completedBy}` : ""}
-                      </div>
-                      {record.attachments?.length ? (
-                        <div
-                          style={{
-                            display: "grid",
-                            gridTemplateColumns: "repeat(auto-fill, minmax(72px, 1fr))",
-                            gap: ".5rem",
-                            marginTop: ".65rem",
-                          }}
-                        >
-                          {record.attachments.map((photo, index) => {
-                            const photoUrl = photoUrls[photo];
-                            return photoUrl ? (
-                              <button
-                                key={`${record.id}-${photo}-${index}`}
-                                type="button"
-                                onClick={() => setSelectedPhotoUrl(photoUrl)}
-                                aria-label={`View maintenance photo ${index + 1}`}
-                                style={{
-                                  padding: 0,
-                                  border: "1px solid #334155",
-                                  borderRadius: "8px",
-                                  overflow: "hidden",
-                                  background: "transparent",
-                                  cursor: "pointer",
-                                }}
-                              >
-                                <img
-                                  src={photoUrl}
-                                  alt={`Maintenance photo ${index + 1}`}
-                                  style={{
-                                    display: "block",
-                                    width: "100%",
-                                    aspectRatio: "1",
-                                    objectFit: "cover",
-                                  }}
-                                />
-                              </button>
-                            ) : (
-                              <div
-                                key={`${record.id}-${photo}-${index}`}
-                                style={{
-                                  display: "grid",
-                                  placeItems: "center",
-                                  aspectRatio: "1",
-                                  border: "1px solid #334155",
-                                  borderRadius: "8px",
-                                  color: "#94a3b8",
-                                  fontSize: ".75rem",
-                                }}
-                              >
-                                Loading…
-                              </div>
-                            );
-                          })}
-                        </div>
-                      ) : null}
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p>No history for this location yet.</p>
-              )}
-
-              <button
-                style={{ ...buttonStyle, marginTop: "1rem" }}
-                onClick={() =>
-                  setShowAddMaintenance(!showAddMaintenance)
-                }
-              >
-                Add Maintenance
-              </button>
-
-              {showAddMaintenance && (
-                <div
-                  style={{
-                    display: "grid",
-                    gap: ".75rem",
-                    marginTop: "1rem",
-                  }}
-                >
-                  <label>
-                    <div style={labelStyle}>Location Name</div>
-                    <input
-                      placeholder="e.g. Port outboard, bow light, fuel tank"
-                      value={selectedPin.name}
-                      onChange={(event) => updateSelectedPinName(event.target.value)}
-                      style={inputStyle}
-                      autoFocus
-                    />
-                  </label>
-
-                  <label>
-                    <div style={labelStyle}>Completed Date</div>
-                    <input
-                      type="date"
-                      value={form.completedDate}
-                      onChange={(event) =>
-                        setForm({
-                          ...form,
-                          completedDate: event.target.value,
-                        })
-                      }
-                      style={inputStyle}
-                    />
-                  </label>
-
-                  <label>
-                    <div style={labelStyle}>Completed By</div>
-                    <input
-                      placeholder="Name of person who completed the work"
-                      value={form.completedBy}
-                      onChange={(event) =>
-                        setForm({ ...form, completedBy: event.target.value })
-                      }
-                      style={inputStyle}
-                    />
-                  </label>
-
-                  <label>
-                    <div style={labelStyle}>System</div>
-                    <select
-                      value={form.system}
-                      onChange={(event) =>
-                        setForm({
-                          ...form,
-                          system: event.target.value,
-                        })
-                      }
-                      style={inputStyle}
-                    >
-                      {systems.map((system) => (
-                        <option key={system}>{system}</option>
-                      ))}
-                    </select>
-                  </label>
-
-                  <label>
-                    <div style={labelStyle}>Category</div>
-                    <select
-                      value={form.category}
-                      onChange={(event) =>
-                        setForm({
-                          ...form,
-                          category: event.target.value as Category,
-                        })
-                      }
-                      style={inputStyle}
-                    >
-                      <option>Repair</option>
-                      <option>Maintenance</option>
-                      <option>Inspection</option>
-                      <option>Admin</option>
-                    </select>
-                  </label>
-
-                  <input
-                    placeholder="Item, e.g. O2 Sensor"
-                    value={form.item}
-                    onChange={(event) =>
-                      setForm({
-                        ...form,
-                        item: event.target.value,
-                      })
-                    }
-                    style={inputStyle}
-                  />
-
-                  <input
-                    placeholder="Task performed"
-                    value={form.title}
-                    onChange={(event) =>
-                      setForm({
-                        ...form,
-                        title: event.target.value,
-                      })
-                    }
-                    style={inputStyle}
-                  />
-
-                  <textarea
-                    placeholder="Notes"
-                    value={form.notes}
-                    onChange={(event) =>
-                      setForm({
-                        ...form,
-                        notes: event.target.value,
-                      })
-                    }
-                    style={{
-                      ...inputStyle,
-                      minHeight: "90px",
-                    }}
-                  />
-
-                  <label>
-                    <div style={labelStyle}>Photos</div>
-                    <input
-                      type="file"
-                      accept="image/*"
-                      multiple
-                      onChange={addPhotos}
-                      disabled={uploadingPhotos}
-                      style={inputStyle}
-                    />
-                    {uploadingPhotos && (
-                      <div style={{ color: "#94a3b8", marginTop: ".35rem" }}>
-                        Uploading photos…
-                      </div>
-                    )}
-                  </label>
-
-                  {form.attachments.length > 0 && (
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: ".5rem" }}>
-                      {form.attachments.map((photo, index) => {
-                        const photoUrl = photoUrls[photo];
-                        return photoUrl ? (
-                          <button
-                            key={`${photo}-${index}`}
-                            type="button"
-                            onClick={() => setSelectedPhotoUrl(photoUrl)}
-                            style={{ padding: 0, border: 0, background: "transparent", cursor: "pointer" }}
-                          >
-                            <img
-                              src={photoUrl}
-                              alt={`Maintenance attachment ${index + 1}`}
-                              style={{ width: "100%", aspectRatio: "1", objectFit: "cover", borderRadius: "8px" }}
-                            />
-                          </button>
-                        ) : (
-                          <div key={`${photo}-${index}`} style={{ display: "grid", placeItems: "center", aspectRatio: "1", border: "1px solid #334155", borderRadius: "8px", color: "#94a3b8" }}>
-                            Loading…
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-
-                  <div style={{ display: "flex", gap: ".75rem" }}>
-                    <button
-                      type="button"
-                      disabled={uploadingPhotos}
-                      style={{
-                        ...buttonStyle,
-                        flex: 1,
-                        opacity: uploadingPhotos ? 0.6 : 1,
-                        cursor: uploadingPhotos ? "not-allowed" : "pointer",
-                      }}
-                      onClick={() => void saveMaintenance()}
-                    >
-                      Save Maintenance
-                    </button>
-                    <button
-                      type="button"
-                      disabled={uploadingPhotos}
-                      style={{
-                        ...buttonStyle,
-                        flex: 1,
-                        background: "#334155",
-                        opacity: uploadingPhotos ? 0.6 : 1,
-                        cursor: uploadingPhotos ? "not-allowed" : "pointer",
-                      }}
-                      onClick={() => void cancelMaintenance()}
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-              )}
-            </>
-          ) : (
-            <p style={{ color: "#94a3b8" }}>No location selected.</p>
-          )}
-        </aside>
-      </div>
-
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "end", gap: "1rem", marginTop: "2rem", flexWrap: "wrap" }}>
-        <h3 style={{ margin: 0 }}>Completed Maintenance</h3>
-        <label>
-          <div style={labelStyle}>System</div>
-          <select
-            value={systemFilter}
-            onChange={(event) => setSystemFilter(event.target.value)}
-            style={{ ...inputStyle, width: "220px" }}
-          >
-            <option value="All">All Systems</option>
-            {systems.map((system) => (
-              <option key={system} value={system}>{system}</option>
-            ))}
+    <div style={{ display: "flex", justifyContent: "space-between", gap: "1rem", flexWrap: "wrap", alignItems: "end" }}>
+      <div style={{ flex: "1 1 320px" }}>
+        <h2 style={{ marginTop: 0 }}>{maintenanceTab}</h2>
+        <label><div style={{ ...labelStyle, fontSize: "1.05rem" }}>SYSTEM FILTER</div>
+          <select value={systemFilter} onChange={(e) => setSystemFilter(e.target.value)} style={{ ...inputStyle, borderColor: "#38bdf8", fontWeight: 700 }}>
+            {systemOptions.map((system) => <option key={system}>{system}</option>)}
           </select>
         </label>
       </div>
-
-      <button
-        style={{ ...buttonStyle, marginTop: "1rem" }}
-        onClick={exportMaintenance}
-      >
-        Export Maintenance Log
-      </button>
-
-      <div
-        style={{
-          display: "grid",
-          gap: "1rem",
-          marginTop: "1rem",
-        }}
-      >
-        {filteredMaintenance.map((record) => (
-          <div key={record.id} style={cardStyle}>
-            <h3 style={{ marginTop: 0 }}>{record.title}</h3>
-
-            <p>
-              {record.system}
-              {record.item ? ` → ${record.item}` : ""}
-            </p>
-
-            <p>
-              {record.category} · Completed:{" "}
-              {record.completedDate
-                ? formatDate(record.completedDate)
-                : "TBD"}
-              {record.completedBy ? ` · By ${record.completedBy}` : ""}
-            </p>
-
-            <p style={{ color: "#cbd5e1" }}>
-              {record.notes}
-            </p>
-
-            {record.attachments?.length ? (
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))", gap: ".75rem", marginBottom: "1rem" }}>
-                {record.attachments.map((photo, index) => {
-                  const photoUrl = photoUrls[photo];
-                  return photoUrl ? (
-                    <button
-                      key={`${record.id}-${photo}-${index}`}
-                      type="button"
-                      onClick={() => setSelectedPhotoUrl(photoUrl)}
-                      style={{ padding: 0, border: 0, background: "transparent", cursor: "pointer" }}
-                    >
-                      <img
-                        src={photoUrl}
-                        alt={`Maintenance photo ${index + 1}`}
-                        style={{ width: "100%", aspectRatio: "1", objectFit: "cover", borderRadius: "8px" }}
-                      />
-                    </button>
-                  ) : (
-                    <div key={`${record.id}-${photo}-${index}`} style={{ display: "grid", placeItems: "center", aspectRatio: "1", border: "1px solid #334155", borderRadius: "8px", color: "#94a3b8" }}>
-                      Loading…
-                    </div>
-                  );
-                })}
-              </div>
-            ) : null}
-
-            <button
-              style={dangerButtonStyle}
-              onClick={() => void deleteMaintenance(record.id)}
-            >
-              Delete
-            </button>
-          </div>
-        ))}
+      <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap" }}>
+        <button style={buttonStyle} onClick={addRecord}>Add Maintenance Record</button>
+        <button style={{ ...buttonStyle, background: "#0f766e" }} onClick={exportCsv}>Export CSV</button>
       </div>
+    </div>
 
-      {selectedPhotoUrl && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-label="Maintenance photo viewer"
-          onClick={() => setSelectedPhotoUrl(null)}
-          style={{
-            position: "fixed",
-            inset: 0,
-            zIndex: 1000,
-            display: "grid",
-            placeItems: "center",
-            padding: "2rem",
-            background: "rgba(0, 0, 0, .86)",
-          }}
-        >
-          <button
-            type="button"
-            onClick={() => setSelectedPhotoUrl(null)}
-            style={{
-              position: "fixed",
-              top: "1rem",
-              right: "1rem",
-              width: "44px",
-              height: "44px",
-              border: "1px solid #64748b",
-              borderRadius: "999px",
-              background: "#0f172a",
-              color: "white",
-              fontSize: "1.5rem",
-              cursor: "pointer",
-            }}
-            aria-label="Close photo viewer"
-          >
-            ×
-          </button>
-          <img
-            src={selectedPhotoUrl}
-            alt="Full-size maintenance photo"
-            onClick={(event) => event.stopPropagation()}
-            style={{
-              maxWidth: "95vw",
-              maxHeight: "90vh",
-              objectFit: "contain",
-              borderRadius: "10px",
-              boxShadow: "0 20px 60px rgba(0,0,0,.5)",
-            }}
-          />
-        </div>
-      )}
-    </section>
-  );
-}
-function displayTodoStatus(status: Todo["status"]) {
-  return status === "Open Issue" ? "Needs Attention" : status;
+    {targetType === "boat" ? (
+      <SchematicPanel
+        title={`${boat.boat_code} Vessel Schematic`}
+        schematic={boat.schematic}
+        pins={boatPins.filter((pin) => systemFilter === "All" || pin.system === systemFilter)}
+        records={tabRecords}
+        placing={placing?.target_type === "boat"}
+        onAddPin={() => setPlacing(placing?.target_type === "boat" ? null : { target_type: "boat", engine_id: null })}
+        onPlace={(event) => void placePin(event, "boat", null)}
+        onPin={(pin) => setEditor({ ...emptyEditor("boat", pin.system), pin_id: pin.id })}
+        pinField="pin_id"
+      />
+    ) : engines.length ? (
+      <div className="maintenance-schematic-grid">
+        {engines.map((engine) => <SchematicPanel
+          key={engine.id}
+          title={`${engine.position} Engine · ${engine.engine_code}`}
+          schematic={engine.schematic}
+          pins={(enginePins[engine.id] ?? []).filter((pin) => systemFilter === "All" || pin.system === systemFilter)}
+          records={tabRecords.filter((record) => record.engine_id === engine.id)}
+          placing={placing?.target_type === "engine" && placing.engine_id === engine.id}
+          onAddPin={() => setPlacing(placing?.target_type === "engine" && placing.engine_id === engine.id ? null : { target_type: "engine", engine_id: engine.id })}
+          onPlace={(event) => void placePin(event, "engine", engine.id)}
+          onPin={(pin) => setEditor({ ...emptyEditor("engine", pin.system, engine.id), engine_pin_id: pin.id })}
+          pinField="engine_pin_id"
+        />)}
+      </div>
+    ) : <div style={{ ...cardStyle, marginTop: "1.25rem" }}>No engines are currently assigned to this vessel.</div>}
+
+    <h2>{targetType === "boat" ? "Vessel" : "Engine"} Maintenance Records</h2>
+    <div style={{ display: "grid", gap: ".75rem" }}>
+      {filteredRecords.length ? filteredRecords.map((record) => <RecordCard key={record.id} record={record} engines={engines} onEdit={() => startEdit(record)} onDelete={() => void deleteRecord(record)} onPhoto={setSelectedPhotoUrl} />) : <div style={cardStyle}>No records match this system.</div>}
+    </div>
+
+    {editor && <RecordEditor boat={boat} engines={engines} state={editor} setState={setEditor} onClose={() => setEditor(null)} onSaved={async () => { setEditor(null); await onChanged(); }} />}
+    {selectedPhotoUrl && <div onClick={() => setSelectedPhotoUrl(null)} style={photoOverlayStyle}><img src={selectedPhotoUrl} alt="Maintenance attachment" onClick={(e) => e.stopPropagation()} style={{ maxWidth: "95vw", maxHeight: "90vh", objectFit: "contain", borderRadius: "10px" }} /></div>}
+  </section>;
 }
 
-function getPinStatus(todos: Todo[]) {
-  if (todos.some((t) => t.status === "Open Issue")) return "Open Issue";
-  if (todos.some((t) => t.status === "Monitor")) return "Monitor";
-  return "OK";
+function SchematicPanel({ title, schematic, pins, records, placing, onAddPin, onPlace, onPin, pinField }: { title: string; schematic: string | null; pins: Pin[]; records: MaintenanceRecord[]; placing: boolean; onAddPin: () => void; onPlace: (e: MouseEvent<HTMLDivElement>) => void; onPin: (pin: Pin) => void; pinField: "pin_id" | "engine_pin_id" }) {
+  return <div className="schematic-panel">
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "1rem", flexWrap: "wrap" }}><h3 style={{ marginBottom: ".5rem" }}>{title}</h3><button style={{ ...buttonStyle, background: placing ? "#475569" : "#2563eb" }} onClick={onAddPin}>{placing ? "Cancel Pin Placement" : "Add Pin"}</button></div>
+    {placing && <p style={{ color: "#7dd3fc" }}>Click the schematic to place a pin. The current System filter will be saved on that pin.</p>}
+    {schematic ? <div onClick={onPlace} style={{ position: "relative", background: "#f8fafc", borderRadius: "12px", overflow: "hidden", cursor: placing ? "crosshair" : "default" }}>
+      <img src={schematic} alt={title} style={{ width: "100%", display: "block", pointerEvents: "none" }} />
+      {pins.map((pin) => {
+        const related = records.filter((record) => record[pinField] === pin.id && record.status !== "Done");
+        const color = related.some((record) => record.status === "Open Issue") ? "#ef4444" : related.some((record) => record.status === "Scheduled") ? "#3b82f6" : "#22c55e";
+        return <button key={pin.id} title={`${pin.name || pin.system} · ${pin.system}`} onClick={(e) => { e.stopPropagation(); onPin(pin); }} style={pinStyle(pin.x, pin.y, color)}>•</button>;
+      })}
+    </div> : <div style={cardStyle}>No schematic set for this item.</div>}
+  </div>;
 }
 
-function statusColor(status: string) {
-  if (status === "Open Issue") return "#ef4444";
-  if (status === "Monitor") return "#facc15";
-  return "#22c55e";
+function TodoView({ boat, engines, records, onChanged }: { boat: Boat; engines: Engine[]; records: MaintenanceRecord[]; onChanged: () => Promise<void> }) {
+  const [editing, setEditing] = useState<EditorState | null>(null);
+  const openIssues = records.filter((record) => record.status === "Open Issue").sort(sortDue);
+  const scheduled = records.filter((record) => record.status === "Scheduled" && (isOverdue(record.due_date) || isWithinDays(record.due_date, DUE_SOON_DAYS))).sort(sortDue);
+
+  async function markDone(record: MaintenanceRecord) {
+    const { error } = await supabase.from("maintenance_records").update({ status: "Done", completed_date: new Date().toISOString().slice(0, 10) }).eq("id", record.id);
+    if (error) return alert(`Could not update record:\n\n${error.message}`);
+    await onChanged();
+  }
+
+  const list = (title: string, items: MaintenanceRecord[], empty: string) => <div style={cardStyle}>
+    <h2 style={{ marginTop: 0 }}>{title}</h2>
+    {items.length ? <div style={{ display: "grid", gap: ".75rem" }}>{items.map((record) => <div key={record.id} style={{ border: "1px solid #334155", borderRadius: "10px", padding: ".9rem" }}>
+      <strong>{statusDot(record.status)} {record.title}</strong>
+      <div style={{ color: "#94a3b8", marginTop: ".25rem" }}>{recordTargetLabel(record, engines)} · {record.system} · {record.category}</div>
+      <div style={{ marginTop: ".35rem" }}>{record.due_date ? `Due ${formatDate(record.due_date)}` : "No due date"}{record.cost != null ? ` · $${Number(record.cost).toFixed(2)}` : ""}</div>
+      {record.notes && <p style={{ color: "#cbd5e1" }}>{record.notes}</p>}
+      <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap" }}><button style={buttonStyle} onClick={() => setEditing(toEditorState(record))}>Edit</button><button style={{ ...buttonStyle, background: "#166534" }} onClick={() => void markDone(record)}>Mark Done</button></div>
+    </div>)}</div> : <p style={{ color: "#94a3b8", marginBottom: 0 }}>{empty}</p>}
+  </div>;
+
+  return <section style={panelStyle}>
+    <div style={{ display: "flex", justifyContent: "space-between", gap: "1rem", flexWrap: "wrap", alignItems: "center", marginBottom: "1rem" }}>
+      <p style={{ color: "#94a3b8", margin: 0 }}>To-Do is a live view of maintenance records, so a repair never has to be entered twice.</p>
+      <button style={buttonStyle} onClick={() => setEditing(emptyEditor("boat"))}>Add To-Do</button>
+    </div>
+    <div className="responsive-grid-equal">{list("Open Issues", openIssues, "No open issues.")}{list(`Scheduled · within ${DUE_SOON_DAYS} days`, scheduled, `Nothing scheduled within ${DUE_SOON_DAYS} days.`)}</div>
+    {editing && <RecordEditor boat={boat} engines={engines} state={editing} setState={setEditing} onClose={() => setEditing(null)} onSaved={async () => { setEditing(null); await onChanged(); }} />}
+  </section>;
 }
 
-function statusDot(status: string) {
-  if (status === "Open Issue") return "🔴";
-  if (status === "Monitor") return "🟡";
-  if (status === "Scheduled") return "🔵";
-  return "✅";
+function RecordEditor({ boat, engines, state, setState, onClose, onSaved }: { boat: Boat; engines: Engine[]; state: EditorState; setState: (s: EditorState | null) => void; onClose: () => void; onSaved: () => Promise<void> }) {
+  const [uploading, setUploading] = useState(false);
+  const options = state.target_type === "boat" ? vesselSystems : engineSystems;
+  const update = <K extends keyof EditorState>(key: K, value: EditorState[K]) => setState({ ...state, [key]: value });
+  const appliesTo = state.target_type === "boat" ? "boat" : `engine:${state.engine_id ?? ""}`;
+
+  function changeTarget(value: string) {
+    if (value === "boat") {
+      setState({ ...state, target_type: "boat", engine_id: null, engine_pin_id: null, system: vesselSystems[0] });
+      return;
+    }
+    const engine_id = Number(value.split(":")[1]);
+    setState({ ...state, target_type: "engine", engine_id, pin_id: null, system: engineSystems[0] });
+  }
+
+  async function addPhotos(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []);
+    if (!files.length) return;
+    setUploading(true);
+    const added: string[] = [];
+    try {
+      for (const file of files) {
+        const path = `${boat.boat_code}/${crypto.randomUUID()}-${safeFileName(file.name) || "photo"}`;
+        const { error } = await supabase.storage.from(MAINTENANCE_PHOTO_BUCKET).upload(path, file, { upsert: false, contentType: file.type || undefined });
+        if (error) throw error;
+        added.push(path);
+      }
+      update("attachments", [...state.attachments, ...added]);
+    } catch (e) {
+      if (added.length) await supabase.storage.from(MAINTENANCE_PHOTO_BUCKET).remove(added);
+      alert(e instanceof Error ? e.message : "Photo upload failed.");
+    } finally {
+      setUploading(false);
+      event.target.value = "";
+    }
+  }
+
+  async function save() {
+    if (!state.title.trim()) return alert("Enter a title.");
+    if (state.target_type === "engine" && !state.engine_id) return alert("Choose an engine.");
+
+    const payload = {
+      target_type: state.target_type,
+      boat_id: state.target_type === "boat" ? boat.id : null,
+      engine_id: state.target_type === "engine" ? state.engine_id : null,
+      boat_id_at_time: state.target_type === "engine" ? boat.id : null,
+      pin_id: state.target_type === "boat" ? state.pin_id : null,
+      engine_pin_id: state.target_type === "engine" ? state.engine_pin_id : null,
+      title: state.title.trim(),
+      item: state.item.trim() || null,
+      description: state.description.trim() || null,
+      system: state.system,
+      category: state.category,
+      status: state.status,
+      date_created: state.date_created,
+      due_date: state.due_date || null,
+      completed_date: state.status === "Done" ? (state.completed_date || new Date().toISOString().slice(0, 10)) : (state.completed_date || null),
+      completed_by: state.completed_by.trim() || null,
+      work_order: state.work_order.trim() || null,
+      notes: state.notes.trim(),
+      attachments: state.attachments,
+      cost: state.cost === "" ? null : Number(state.cost),
+    };
+
+    const result = state.record_id
+      ? await supabase.from("maintenance_records").update(payload).eq("id", state.record_id)
+      : await supabase.from("maintenance_records").insert(payload);
+    if (result.error) return alert(`Could not save record:\n\n${result.error.message}`);
+    await onSaved();
+  }
+
+  return <div style={{ ...cardStyle, marginTop: "1.25rem", borderColor: "#38bdf8" }}>
+    <div style={{ display: "flex", justifyContent: "space-between", gap: "1rem" }}><h2 style={{ marginTop: 0 }}>{state.record_id ? "Edit Maintenance Record" : "Add Maintenance Record"}</h2><button onClick={onClose} style={{ ...buttonStyle, background: "#475569", alignSelf: "start" }}>Close</button></div>
+    <div className="responsive-grid-equal">
+      <label><div style={labelStyle}>Applies To</div><select value={appliesTo} onChange={(e) => changeTarget(e.target.value)} style={inputStyle}>
+        <option value="boat">Vessel · {boat.boat_code}</option>
+        {engines.map((engine) => <option key={engine.id} value={`engine:${engine.id}`}>{engine.position} Engine · {engine.engine_code} · {[engine.make, engine.model].filter(Boolean).join(" ")}</option>)}
+      </select></label>
+      <label><div style={labelStyle}>System</div><select value={state.system} onChange={(e) => update("system", e.target.value)} style={inputStyle}>{Array.from(new Set([...options, state.system])).map((system) => <option key={system}>{system}</option>)}</select></label>
+      <label><div style={labelStyle}>Title</div><input value={state.title} onChange={(e) => update("title", e.target.value)} style={inputStyle} /></label>
+      <label><div style={labelStyle}>Item</div><input value={state.item} onChange={(e) => update("item", e.target.value)} style={inputStyle} /></label>
+      <label><div style={labelStyle}>Category</div><select value={state.category} onChange={(e) => update("category", e.target.value as Category)} style={inputStyle}>{categories.map((category) => <option key={category}>{category}</option>)}</select></label>
+      <label><div style={labelStyle}>Status</div><select value={state.status} onChange={(e) => update("status", e.target.value as Status)} style={inputStyle}>{statuses.map((status) => <option key={status}>{status}</option>)}</select></label>
+      <label><div style={labelStyle}>Cost</div><input type="number" min="0" step="0.01" value={state.cost} onChange={(e) => update("cost", e.target.value)} style={inputStyle} placeholder="0.00" /></label>
+      <label><div style={labelStyle}>Date Created</div><input type="date" value={state.date_created} onChange={(e) => update("date_created", e.target.value)} style={inputStyle} /></label>
+      <label><div style={labelStyle}>Due Date</div><input type="date" value={state.due_date} onChange={(e) => update("due_date", e.target.value)} style={inputStyle} /></label>
+      <label><div style={labelStyle}>Completed Date</div><input type="date" value={state.completed_date} onChange={(e) => update("completed_date", e.target.value)} style={inputStyle} /></label>
+      <label><div style={labelStyle}>Completed By</div><input value={state.completed_by} onChange={(e) => update("completed_by", e.target.value)} style={inputStyle} /></label>
+      <label><div style={labelStyle}>Work Order</div><input value={state.work_order} onChange={(e) => update("work_order", e.target.value)} style={inputStyle} /></label>
+    </div>
+    <label style={{ display: "block", marginTop: ".75rem" }}><div style={labelStyle}>Description</div><textarea value={state.description} onChange={(e) => update("description", e.target.value)} style={{ ...inputStyle, minHeight: "80px" }} /></label>
+    <label style={{ display: "block", marginTop: ".75rem" }}><div style={labelStyle}>Notes</div><textarea value={state.notes} onChange={(e) => update("notes", e.target.value)} style={{ ...inputStyle, minHeight: "100px" }} /></label>
+    <label style={{ display: "block", marginTop: ".75rem" }}><div style={labelStyle}>Photos</div><input type="file" accept="image/*" multiple onChange={(e) => void addPhotos(e)} disabled={uploading} style={inputStyle} /></label>
+    {state.attachments.length > 0 && <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap", marginTop: ".75rem" }}>{state.attachments.map((path) => <a key={path} href={maintenancePhotoUrl(path)} target="_blank" rel="noreferrer" style={{ color: "#7dd3fc" }}>Photo</a>)}</div>}
+    <button onClick={() => void save()} style={{ ...buttonStyle, marginTop: "1rem" }}>{state.record_id ? "Save Changes" : "Save Record"}</button>
+  </div>;
 }
 
-function badgeStyle(bg: string) {
+function RecordCard({ record, engines, onEdit, onDelete, onPhoto }: { record: MaintenanceRecord; engines: Engine[]; onEdit: () => void; onDelete: () => void; onPhoto: (url: string) => void }) {
+  return <div style={cardStyle}>
+    <div style={{ display: "flex", justifyContent: "space-between", gap: "1rem", flexWrap: "wrap" }}>
+      <div><h3 style={{ margin: 0 }}>{statusDot(record.status)} {record.title}</h3><div style={{ color: "#94a3b8", marginTop: ".25rem" }}>{recordTargetLabel(record, engines)} · {record.system}</div></div>
+      <span style={badgeStyle(record.status === "Open Issue" ? "#991b1b" : record.status === "Scheduled" ? "#1d4ed8" : "#166534")}>{record.status}</span>
+    </div>
+    <p>{record.category}{record.item ? ` · ${record.item}` : ""}{record.cost != null ? ` · $${Number(record.cost).toFixed(2)}` : ""}</p>
+    <p style={{ color: "#94a3b8" }}>Created {formatDate(record.date_created)}{record.due_date ? ` · Due ${formatDate(record.due_date)}` : ""}{record.completed_date ? ` · Completed ${formatDate(record.completed_date)}` : ""}</p>
+    {record.description && <p>{record.description}</p>}{record.notes && <p style={{ color: "#cbd5e1" }}>{record.notes}</p>}
+    {record.attachments?.length > 0 && <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap", marginBottom: ".75rem" }}>{record.attachments.map((path, i) => <button key={path} onClick={() => onPhoto(maintenancePhotoUrl(path))} style={{ ...buttonStyle, background: "#334155", padding: ".45rem .7rem" }}>Photo {i + 1}</button>)}</div>}
+    <div style={{ display: "flex", gap: ".5rem" }}><button style={buttonStyle} onClick={onEdit}>Edit</button><button style={dangerButtonStyle} onClick={onDelete}>Delete</button></div>
+  </div>;
+}
+
+function toEditorState(record: MaintenanceRecord): EditorState {
   return {
-    background: bg,
-    color: "white",
-    padding: ".5rem .9rem",
-    borderRadius: "8px",
-    fontWeight: 700,
+    record_id: record.id,
+    target_type: record.target_type,
+    engine_id: record.engine_id,
+    pin_id: record.pin_id,
+    engine_pin_id: record.engine_pin_id,
+    title: record.title,
+    item: record.item ?? "",
+    description: record.description ?? "",
+    system: record.system,
+    category: record.category,
+    status: record.status,
+    date_created: record.date_created,
+    due_date: record.due_date ?? "",
+    completed_date: record.completed_date ?? "",
+    completed_by: record.completed_by ?? "",
+    work_order: record.work_order ?? "",
+    notes: record.notes ?? "",
+    cost: record.cost == null ? "" : String(record.cost),
+    attachments: record.attachments ?? [],
   };
 }
 
-function pinStyle(x: number, y: number, color: string, selected = false) {
-  return {
-    position: "absolute" as const,
-    left: `${x}%`,
-    top: `${y}%`,
-    transform: "translate(-50%, -50%)",
-    width: selected ? "30px" : "24px",
-    height: selected ? "30px" : "24px",
-    borderRadius: "999px",
-    border: selected ? "3px solid white" : "2px solid white",
-    background: color,
-    color: "white",
-    fontWeight: 800,
-    cursor: "pointer",
-    boxShadow: "0 2px 10px rgba(0,0,0,0.45)",
-  };
+function recordTargetLabel(record: MaintenanceRecord, engines: Engine[]) {
+  if (record.target_type === "boat") return "Vessel";
+  const engine = engines.find((item) => item.id === record.engine_id);
+  return engine ? `${engine.position} Engine · ${engine.engine_code}` : "Engine";
 }
-
-
-function formatDate(date: string) {
-  if (!date) return "No date";
-
-  const [year, month, day] = date.split("-");
-
-  return new Date(
-    Number(year),
-    Number(month) - 1,
-    Number(day)
-  ).toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-  });
+function sortDue(a: MaintenanceRecord, b: MaintenanceRecord) { return (a.due_date || "9999-99-99").localeCompare(b.due_date || "9999-99-99"); }
+function statusDot(status: Status) { return status === "Open Issue" ? "🔴" : status === "Scheduled" ? "🔵" : "✅"; }
+function formatDate(date: string) { if (!date) return "No date"; const [y,m,d] = date.split("-"); return new Date(Number(y), Number(m)-1, Number(d)).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); }
+function downloadCsv(filename: string, rows: Record<string, unknown>[]) {
+  if (!rows.length) return alert("There are no records to export.");
+  const headers = Object.keys(rows[0]);
+  const esc = (value: unknown) => `"${String(value ?? "").replaceAll('"', '""')}"`;
+  const csv = [headers.map(esc).join(","), ...rows.map((row) => headers.map((header) => esc(row[header])).join(","))].join("\n");
+  const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
 }
-
-function TimePicker({
-  label,
-  hour,
-  minute,
-  onHourChange,
-  onMinuteChange,
-}: {
-  label: string;
-  hour: string;
-  minute: string;
-  onHourChange: (value: string) => void;
-  onMinuteChange: (value: string) => void;
-}) {
-  const hours = Array.from({ length: 24 }, (_, i) =>
-    String(i).padStart(2, "0")
-  );
-  const minutes = ["00", "15", "30", "45"];
-
-  return (
-    <label>
-      <div style={labelStyle}>{label}</div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: ".5rem" }}>
-        <select
-          value={hour}
-          onChange={(e) => onHourChange(e.target.value)}
-          style={inputStyle}
-        >
-          {hours.map((h) => (
-            <option key={h} value={h}>
-              {h}
-            </option>
-          ))}
-        </select>
-
-        <select
-          value={minute}
-          onChange={(e) => onMinuteChange(e.target.value)}
-          style={inputStyle}
-        >
-          {minutes.map((m) => (
-            <option key={m} value={m}>
-              {m}
-            </option>
-          ))}
-        </select>
-      </div>
-    </label>
-  );
-}
-
-function EngineHoursRow({
-  label,
-  value,
-  onReset,
-}: {
-  label: string;
-  value: number;
-  onReset?: () => void;
-}) {
-  return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: "1fr auto",
-        gap: ".75rem",
-        alignItems: "center",
-        borderBottom: "1px solid #1e293b",
-        padding: ".5rem 0",
-      }}
-    >
-      <div>
-        <div style={{ color: "#94a3b8" }}>{label}</div>
-        <strong>{value.toFixed(1)} hrs</strong>
-      </div>
-
-      {onReset && (
-        <button
-          onClick={onReset}
-          style={{
-            ...buttonStyle,
-            padding: ".4rem .7rem",
-            background: "#334155",
-          }}
-        >
-          Reset
-        </button>
-      )}
-    </div>
-  );
-}
-
-function InfoRow({
-  label,
-  value,
-}: {
-  label: string;
-  value: React.ReactNode;
-}) {
-  return (
-    <div
-      style={{
-        display: "flex",
-        justifyContent: "space-between",
-        padding: ".35rem 0",
-        borderBottom: "1px solid #1e293b",
-      }}
-    >
-      <span style={{ color: "#94a3b8" }}>{label}</span>
-      <span>{value}</span>
-    </div>
-  );
-}
-
-const infoCardStyle = {
-  background: "#020617",
-  border: "1px solid #334155",
-  borderRadius: "12px",
-  padding: "1rem",
-};
-
-const labelStyle = {
-  marginBottom: ".25rem",
-  fontWeight: 700,
-  color: "#cbd5e1",
-};
-
-const panelStyle = {
-  background: "#0f172a",
-  border: "1px solid #334155",
-  borderRadius: "12px",
-  padding: "1rem",
-};
-
-const cardStyle = {
-  background: "#020617",
-  border: "1px solid #334155",
-  borderRadius: "12px",
-  padding: "1rem",
-};
-
-const inputStyle = {
-  width: "100%",
-  minWidth: 0,
-  minHeight: "46px",
-  boxSizing: "border-box" as const,
-  padding: ".75rem",
-  borderRadius: "8px",
-  border: "1px solid #334155",
-  background: "#020617",
-  color: "#f8fafc",
-};
-
-const buttonStyle = {
-  padding: ".75rem 1rem",
-  borderRadius: "10px",
-  border: "none",
-  background: "#2563eb",
-  color: "white",
-  fontWeight: 700,
-  cursor: "pointer",
-};
-
-const dangerButtonStyle = {
-  ...buttonStyle,
-  background: "#991b1b",
-};
+function InfoRow({ label, value }: { label: string; value: React.ReactNode }) { return <div style={{ display: "flex", justifyContent: "space-between", gap: "1rem", padding: ".35rem 0", borderBottom: "1px solid #1e293b" }}><span style={{ color: "#94a3b8" }}>{label}</span><span style={{ textAlign: "right" }}>{value}</span></div>; }
+function badgeStyle(bg: string) { return { background: bg, color: "white", padding: ".5rem .9rem", borderRadius: "8px", fontWeight: 700 }; }
+function pinStyle(x: number, y: number, color: string) { return { position: "absolute" as const, left: `${x}%`, top: `${y}%`, transform: "translate(-50%, -50%)", width: "26px", height: "26px", borderRadius: "999px", border: "2px solid white", background: color, color: "white", fontWeight: 800, cursor: "pointer", boxShadow: "0 2px 10px rgba(0,0,0,.45)" }; }
+const infoCardStyle = { background: "#020617", border: "1px solid #334155", borderRadius: "12px", padding: "1rem" };
+const labelStyle = { marginBottom: ".25rem", fontWeight: 700, color: "#cbd5e1" };
+const panelStyle = { background: "#0f172a", border: "1px solid #334155", borderRadius: "12px", padding: "1rem" };
+const cardStyle = { background: "#020617", border: "1px solid #334155", borderRadius: "12px", padding: "1rem" };
+const inputStyle = { width: "100%", minWidth: 0, minHeight: "46px", boxSizing: "border-box" as const, padding: ".75rem", borderRadius: "8px", border: "1px solid #334155", background: "#020617", color: "#f8fafc" };
+const buttonStyle = { padding: ".75rem 1rem", borderRadius: "10px", border: "none", background: "#2563eb", color: "white", fontWeight: 700, cursor: "pointer" };
+const dangerButtonStyle = { ...buttonStyle, background: "#991b1b" };
+const photoOverlayStyle = { position: "fixed" as const, inset: 0, zIndex: 50, display: "grid", placeItems: "center", background: "rgba(0,0,0,.88)", padding: "1rem", cursor: "pointer" };
