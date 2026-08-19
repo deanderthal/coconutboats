@@ -307,6 +307,7 @@ function MaintenanceLog({ boat, engines, records, onChanged }: { boat: Boat; eng
   const [enginePins, setEnginePins] = useState<Record<number, Pin[]>>({});
   const [placing, setPlacing] = useState<{ target_type: TargetType; engine_id: number | null } | null>(null);
   const [editor, setEditor] = useState<EditorState | null>(null);
+  const [selectedPin, setSelectedPin] = useState<{ pin: Pin; target_type: TargetType; engine_id: number | null } | null>(null);
   const [selectedPhotoUrl, setSelectedPhotoUrl] = useState<string | null>(null);
 
   const targetType: TargetType = maintenanceTab === "Vessel Maintenance" ? "boat" : "engine";
@@ -369,25 +370,20 @@ function MaintenanceLog({ boat, engines, records, onChanged }: { boat: Boat; eng
   }
 
   function openBoatPin(pin: Pin) {
-    const related = tabRecords
-      .filter((record) => record.pin_id === pin.id)
-      .sort((a, b) => {
-        const aOpen = a.status === "Done" ? 1 : 0;
-        const bOpen = b.status === "Done" ? 1 : 0;
-        return aOpen - bOpen || b.date_created.localeCompare(a.date_created);
-      });
-    setEditor(related.length ? toEditorState(related[0]) : { ...emptyEditor("boat", pin.system), pin_id: pin.id });
+    setSelectedPin({ pin, target_type: "boat", engine_id: null });
   }
 
   function openEnginePin(pin: Pin, engine_id: number) {
-    const related = tabRecords
-      .filter((record) => record.engine_id === engine_id && record.engine_pin_id === pin.id)
-      .sort((a, b) => {
-        const aOpen = a.status === "Done" ? 1 : 0;
-        const bOpen = b.status === "Done" ? 1 : 0;
-        return aOpen - bOpen || b.date_created.localeCompare(a.date_created);
-      });
-    setEditor(related.length ? toEditorState(related[0]) : { ...emptyEditor("engine", pin.system, engine_id), engine_pin_id: pin.id });
+    setSelectedPin({ pin, target_type: "engine", engine_id });
+  }
+
+  function addRecordToSelectedPin() {
+    if (!selectedPin) return;
+    if (selectedPin.target_type === "boat") {
+      setEditor({ ...emptyEditor("boat", selectedPin.pin.system), pin_id: selectedPin.pin.id });
+      return;
+    }
+    setEditor({ ...emptyEditor("engine", selectedPin.pin.system, selectedPin.engine_id), engine_pin_id: selectedPin.pin.id });
   }
 
   function startEdit(record: MaintenanceRecord) {
@@ -431,6 +427,14 @@ function MaintenanceLog({ boat, engines, records, onChanged }: { boat: Boat; eng
     if (targetType === "engine" && !engines.length) return alert("No engines are assigned to this vessel yet.");
     setEditor(emptyEditor(targetType, selectedSystem, targetType === "engine" ? engines[0]?.id ?? null : null));
   }
+
+  const selectedPinRecords = selectedPin
+    ? records
+      .filter((record) => selectedPin.target_type === "boat"
+        ? record.target_type === "boat" && record.pin_id === selectedPin.pin.id
+        : record.target_type === "engine" && record.engine_id === selectedPin.engine_id && record.engine_pin_id === selectedPin.pin.id)
+      .sort((a, b) => b.date_created.localeCompare(a.date_created) || b.id - a.id)
+    : [];
 
   return <section style={panelStyle}>
     <nav className="maintenance-tabs" aria-label="Maintenance type">
@@ -486,11 +490,68 @@ function MaintenanceLog({ boat, engines, records, onChanged }: { boat: Boat; eng
       {filteredRecords.length ? filteredRecords.map((record) => <RecordCard key={record.id} record={record} engines={engines} onEdit={() => startEdit(record)} onDelete={() => void deleteRecord(record)} onPhoto={setSelectedPhotoUrl} />) : <div style={cardStyle}>No records match this system.</div>}
     </div>
 
+    {selectedPin && <PinHistoryModal
+      pin={selectedPin.pin}
+      target_type={selectedPin.target_type}
+      engine={selectedPin.engine_id ? engines.find((engine) => engine.id === selectedPin.engine_id) ?? null : null}
+      records={selectedPinRecords}
+      engines={engines}
+      onClose={() => setSelectedPin(null)}
+      onAddRecord={addRecordToSelectedPin}
+      onEdit={(record) => setEditor(toEditorState(record))}
+      onDelete={(record) => void deleteRecord(record)}
+      onPhoto={setSelectedPhotoUrl}
+    />}
     {editor && <RecordEditorModal onClose={() => setEditor(null)}>
       <RecordEditor boat={boat} engines={engines} state={editor} setState={setEditor} onClose={() => setEditor(null)} onSaved={async () => { setEditor(null); await onChanged(); }} />
     </RecordEditorModal>}
     {selectedPhotoUrl && <div onClick={() => setSelectedPhotoUrl(null)} style={photoOverlayStyle}><img src={selectedPhotoUrl} alt="Maintenance attachment" onClick={(e) => e.stopPropagation()} style={{ maxWidth: "95vw", maxHeight: "90vh", objectFit: "contain", borderRadius: "10px" }} /></div>}
   </section>;
+}
+
+function PinHistoryModal({ pin, target_type, engine, records, engines, onClose, onAddRecord, onEdit, onDelete, onPhoto }: {
+  pin: Pin;
+  target_type: TargetType;
+  engine: Engine | null;
+  records: MaintenanceRecord[];
+  engines: Engine[];
+  onClose: () => void;
+  onAddRecord: () => void;
+  onEdit: (record: MaintenanceRecord) => void;
+  onDelete: (record: MaintenanceRecord) => void;
+  onPhoto: (url: string) => void;
+}) {
+  if (typeof document === "undefined") return null;
+  const label = pin.name || pin.system || "Maintenance Pin";
+  const locationLabel = target_type === "boat" ? "Vessel" : engine ? `${engine.position} Engine · ${engine.engine_code}` : "Engine";
+  return createPortal(
+    <div role="dialog" aria-modal="true" style={pinHistoryOverlayStyle} onMouseDown={onClose}>
+      <div style={pinHistoryModalStyle} onMouseDown={(e) => e.stopPropagation()}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: "1rem", alignItems: "start", flexWrap: "wrap" }}>
+          <div>
+            <h2 style={{ margin: 0 }}>{label}</h2>
+            <div style={{ color: "#94a3b8", marginTop: ".35rem" }}>{locationLabel} · {pin.system}</div>
+            <div style={{ color: "#cbd5e1", marginTop: ".35rem" }}>{records.length} maintenance record{records.length === 1 ? "" : "s"} on this pin</div>
+          </div>
+          <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap" }}>
+            <button style={buttonStyle} onClick={onAddRecord}>Add a Record</button>
+            <button style={{ ...buttonStyle, background: "#475569" }} onClick={onClose}>Close</button>
+          </div>
+        </div>
+        <div style={{ marginTop: "1rem", display: "grid", gap: ".75rem" }}>
+          {records.length ? records.map((record) => <RecordCard
+            key={record.id}
+            record={record}
+            engines={engines}
+            onEdit={() => onEdit(record)}
+            onDelete={() => onDelete(record)}
+            onPhoto={onPhoto}
+          />) : <div style={cardStyle}>No maintenance records are attached to this pin yet. Use <strong>Add a Record</strong> to create the first one.</div>}
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
 }
 
 function SchematicPanel({ title, schematic, pins, records, placing, onAddPin, onPlace, onPin, pinField }: { title: string; schematic: string | null; pins: Pin[]; records: MaintenanceRecord[]; placing: boolean; onAddPin: () => void; onPlace: (e: MouseEvent<HTMLDivElement>) => void; onPin: (pin: Pin) => void; pinField: "pin_id" | "engine_pin_id" }) {
@@ -735,6 +796,8 @@ const cardStyle = { background: "#020617", border: "1px solid #334155", borderRa
 const inputStyle = { width: "100%", minWidth: 0, minHeight: "46px", boxSizing: "border-box" as const, padding: ".75rem", borderRadius: "8px", border: "1px solid #334155", background: "#020617", color: "#f8fafc" };
 const buttonStyle = { padding: ".75rem 1rem", borderRadius: "10px", border: "none", background: "#2563eb", color: "white", fontWeight: 700, cursor: "pointer" };
 const dangerButtonStyle = { ...buttonStyle, background: "#991b1b" };
+const pinHistoryOverlayStyle = { position: "fixed" as const, inset: 0, zIndex: 900, display: "grid", placeItems: "center", background: "rgba(0,0,0,.78)", padding: "1rem", overflow: "hidden" };
+const pinHistoryModalStyle = { width: "min(980px, 96vw)", maxHeight: "92vh", overflowY: "auto" as const, background: "#0f172a", border: "1px solid #334155", borderRadius: "14px", padding: "1rem", boxSizing: "border-box" as const, boxShadow: "0 24px 80px rgba(0,0,0,.6)" };
 const recordEditorOverlayStyle = { position: "fixed" as const, inset: 0, zIndex: 1000, display: "grid", placeItems: "center", background: "rgba(0,0,0,.78)", padding: "1rem", overflow: "hidden" };
 const recordEditorModalStyle = { width: "min(980px, 96vw)", maxHeight: "92vh", overflowY: "auto" as const, borderRadius: "14px", boxShadow: "0 24px 80px rgba(0,0,0,.6)" };
 const photoOverlayStyle = { position: "fixed" as const, inset: 0, zIndex: 50, display: "grid", placeItems: "center", background: "rgba(0,0,0,.88)", padding: "1rem", cursor: "pointer" };
