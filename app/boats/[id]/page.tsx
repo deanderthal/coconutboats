@@ -2,6 +2,7 @@
 
 import { use, useEffect, useMemo, useState, type ChangeEvent, type MouseEvent } from "react";
 import Link from "next/link";
+import { createPortal } from "react-dom";
 import { fetchBoat, type Boat } from "@/app/data/boats";
 import { supabase } from "@/lib/supabase";
 import { DUE_SOON_DAYS, isOverdue, isWithinDays, summarizeDueDates } from "@/lib/due";
@@ -367,6 +368,28 @@ function MaintenanceLog({ boat, engines, records, onChanged }: { boat: Boat; eng
     setEditor({ ...emptyEditor("engine", initialSystem, engine_id), engine_pin_id: data.id });
   }
 
+  function openBoatPin(pin: Pin) {
+    const related = tabRecords
+      .filter((record) => record.pin_id === pin.id)
+      .sort((a, b) => {
+        const aOpen = a.status === "Done" ? 1 : 0;
+        const bOpen = b.status === "Done" ? 1 : 0;
+        return aOpen - bOpen || b.date_created.localeCompare(a.date_created);
+      });
+    setEditor(related.length ? toEditorState(related[0]) : { ...emptyEditor("boat", pin.system), pin_id: pin.id });
+  }
+
+  function openEnginePin(pin: Pin, engine_id: number) {
+    const related = tabRecords
+      .filter((record) => record.engine_id === engine_id && record.engine_pin_id === pin.id)
+      .sort((a, b) => {
+        const aOpen = a.status === "Done" ? 1 : 0;
+        const bOpen = b.status === "Done" ? 1 : 0;
+        return aOpen - bOpen || b.date_created.localeCompare(a.date_created);
+      });
+    setEditor(related.length ? toEditorState(related[0]) : { ...emptyEditor("engine", pin.system, engine_id), engine_pin_id: pin.id });
+  }
+
   function startEdit(record: MaintenanceRecord) {
     setEditor(toEditorState(record));
   }
@@ -438,7 +461,7 @@ function MaintenanceLog({ boat, engines, records, onChanged }: { boat: Boat; eng
         placing={placing?.target_type === "boat"}
         onAddPin={() => setPlacing(placing?.target_type === "boat" ? null : { target_type: "boat", engine_id: null })}
         onPlace={(event) => void placePin(event, "boat", null)}
-        onPin={(pin) => setEditor({ ...emptyEditor("boat", pin.system), pin_id: pin.id })}
+        onPin={openBoatPin}
         pinField="pin_id"
       />
     ) : engines.length ? (
@@ -452,7 +475,7 @@ function MaintenanceLog({ boat, engines, records, onChanged }: { boat: Boat; eng
           placing={placing?.target_type === "engine" && placing.engine_id === engine.id}
           onAddPin={() => setPlacing(placing?.target_type === "engine" && placing.engine_id === engine.id ? null : { target_type: "engine", engine_id: engine.id })}
           onPlace={(event) => void placePin(event, "engine", engine.id)}
-          onPin={(pin) => setEditor({ ...emptyEditor("engine", pin.system, engine.id), engine_pin_id: pin.id })}
+          onPin={(pin) => openEnginePin(pin, engine.id)}
           pinField="engine_pin_id"
         />)}
       </div>
@@ -463,11 +486,9 @@ function MaintenanceLog({ boat, engines, records, onChanged }: { boat: Boat; eng
       {filteredRecords.length ? filteredRecords.map((record) => <RecordCard key={record.id} record={record} engines={engines} onEdit={() => startEdit(record)} onDelete={() => void deleteRecord(record)} onPhoto={setSelectedPhotoUrl} />) : <div style={cardStyle}>No records match this system.</div>}
     </div>
 
-    {editor && <div style={recordEditorOverlayStyle} onClick={() => setEditor(null)}>
-      <div style={recordEditorModalStyle} onClick={(e) => e.stopPropagation()}>
-        <RecordEditor boat={boat} engines={engines} state={editor} setState={setEditor} onClose={() => setEditor(null)} onSaved={async () => { setEditor(null); await onChanged(); }} />
-      </div>
-    </div>}
+    {editor && <RecordEditorModal onClose={() => setEditor(null)}>
+      <RecordEditor boat={boat} engines={engines} state={editor} setState={setEditor} onClose={() => setEditor(null)} onSaved={async () => { setEditor(null); await onChanged(); }} />
+    </RecordEditorModal>}
     {selectedPhotoUrl && <div onClick={() => setSelectedPhotoUrl(null)} style={photoOverlayStyle}><img src={selectedPhotoUrl} alt="Maintenance attachment" onClick={(e) => e.stopPropagation()} style={{ maxWidth: "95vw", maxHeight: "90vh", objectFit: "contain", borderRadius: "10px" }} /></div>}
   </section>;
 }
@@ -515,8 +536,22 @@ function TodoView({ boat, engines, records, onChanged }: { boat: Boat; engines: 
       <button style={buttonStyle} onClick={() => setEditing(emptyEditor("boat"))}>Add To-Do</button>
     </div>
     <div className="responsive-grid-equal">{list("Open Issues", openIssues, "No open issues.")}{list(`Scheduled · within ${DUE_SOON_DAYS} days`, scheduled, `Nothing scheduled within ${DUE_SOON_DAYS} days.`)}</div>
-    {editing && <RecordEditor boat={boat} engines={engines} state={editing} setState={setEditing} onClose={() => setEditing(null)} onSaved={async () => { setEditing(null); await onChanged(); }} />}
+    {editing && <RecordEditorModal onClose={() => setEditing(null)}>
+      <RecordEditor boat={boat} engines={engines} state={editing} setState={setEditing} onClose={() => setEditing(null)} onSaved={async () => { setEditing(null); await onChanged(); }} />
+    </RecordEditorModal>}
   </section>;
+}
+
+function RecordEditorModal({ children, onClose }: { children: React.ReactNode; onClose: () => void }) {
+  if (typeof document === "undefined") return null;
+  return createPortal(
+    <div role="dialog" aria-modal="true" style={recordEditorOverlayStyle} onMouseDown={onClose}>
+      <div style={recordEditorModalStyle} onMouseDown={(e) => e.stopPropagation()}>
+        {children}
+      </div>
+    </div>,
+    document.body,
+  );
 }
 
 function RecordEditor({ boat, engines, state, setState, onClose, onSaved }: { boat: Boat; engines: Engine[]; state: EditorState; setState: (s: EditorState | null) => void; onClose: () => void; onSaved: () => Promise<void> }) {
@@ -604,7 +639,7 @@ function RecordEditor({ boat, engines, state, setState, onClose, onSaved }: { bo
     }
   }
 
-  return <div style={{ ...cardStyle, marginTop: "1.25rem", borderColor: "#38bdf8" }}>
+  return <div style={{ ...cardStyle, borderColor: "#38bdf8" }}>
     <div style={{ display: "flex", justifyContent: "space-between", gap: "1rem" }}><h2 style={{ marginTop: 0 }}>{state.record_id ? "Edit Maintenance Record" : "Add Maintenance Record"}</h2><button onClick={onClose} style={{ ...buttonStyle, background: "#475569", alignSelf: "start" }}>Close</button></div>
     <div className="responsive-grid-equal">
       <label><div style={labelStyle}>Applies To</div><select value={appliesTo} onChange={(e) => changeTarget(e.target.value)} style={inputStyle}>
@@ -700,6 +735,6 @@ const cardStyle = { background: "#020617", border: "1px solid #334155", borderRa
 const inputStyle = { width: "100%", minWidth: 0, minHeight: "46px", boxSizing: "border-box" as const, padding: ".75rem", borderRadius: "8px", border: "1px solid #334155", background: "#020617", color: "#f8fafc" };
 const buttonStyle = { padding: ".75rem 1rem", borderRadius: "10px", border: "none", background: "#2563eb", color: "white", fontWeight: 700, cursor: "pointer" };
 const dangerButtonStyle = { ...buttonStyle, background: "#991b1b" };
-const recordEditorOverlayStyle = { position: "fixed" as const, inset: 0, zIndex: 45, display: "grid", placeItems: "center", background: "rgba(0,0,0,.72)", padding: "1rem" };
-const recordEditorModalStyle = { width: "min(980px, 96vw)", maxHeight: "92vh", overflowY: "auto" as const, borderRadius: "12px" };
+const recordEditorOverlayStyle = { position: "fixed" as const, inset: 0, zIndex: 1000, display: "grid", placeItems: "center", background: "rgba(0,0,0,.78)", padding: "1rem", overflow: "hidden" };
+const recordEditorModalStyle = { width: "min(980px, 96vw)", maxHeight: "92vh", overflowY: "auto" as const, borderRadius: "14px", boxShadow: "0 24px 80px rgba(0,0,0,.6)" };
 const photoOverlayStyle = { position: "fixed" as const, inset: 0, zIndex: 50, display: "grid", placeItems: "center", background: "rgba(0,0,0,.88)", padding: "1rem", cursor: "pointer" };
