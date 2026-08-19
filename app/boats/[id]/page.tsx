@@ -587,14 +587,14 @@ function TodoView({ boat, engines, records, onChanged }: { boat: Boat; engines: 
       <div style={{ color: "#94a3b8", marginTop: ".25rem" }}>{recordTargetLabel(record, engines)} · {record.system} · {record.category}</div>
       <div style={{ marginTop: ".35rem" }}>{record.due_date ? `Due ${formatDate(record.due_date)}` : "No due date"}{record.cost != null ? ` · $${Number(record.cost).toFixed(2)}` : ""}</div>
       {record.notes && <p style={{ color: "#cbd5e1" }}>{record.notes}</p>}
-      <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap" }}><button style={buttonStyle} onClick={() => setEditing(toEditorState(record))}>Edit</button><button style={{ ...buttonStyle, background: "#166534" }} onClick={() => void markDone(record)}>Mark Done</button></div>
+      <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap" }}><button type="button" style={buttonStyle} onClick={(event) => { event.preventDefault(); event.stopPropagation(); setEditing(toEditorState(record)); }}>Edit</button><button type="button" style={{ ...buttonStyle, background: "#166534" }} onClick={() => void markDone(record)}>Mark Done</button></div>
     </div>)}</div> : <p style={{ color: "#94a3b8", marginBottom: 0 }}>{empty}</p>}
   </div>;
 
   return <section style={panelStyle}>
     <div style={{ display: "flex", justifyContent: "space-between", gap: "1rem", flexWrap: "wrap", alignItems: "center", marginBottom: "1rem" }}>
       <p style={{ color: "#94a3b8", margin: 0 }}>To-Do is a live view of maintenance records, so a repair never has to be entered twice.</p>
-      <button style={buttonStyle} onClick={() => setEditing(emptyEditor("boat"))}>Add To-Do</button>
+      <button type="button" style={buttonStyle} onClick={(event) => { event.preventDefault(); event.stopPropagation(); setEditing(emptyEditor("boat")); }}>Add To-Do</button>
     </div>
     <div className="responsive-grid-equal">{list("Open Issues", openIssues, "No open issues.")}{list(`Scheduled · within ${DUE_SOON_DAYS} days`, scheduled, `Nothing scheduled within ${DUE_SOON_DAYS} days.`)}</div>
     {editing && <RecordEditorModal onClose={() => setEditing(null)}>
@@ -606,8 +606,8 @@ function TodoView({ boat, engines, records, onChanged }: { boat: Boat; engines: 
 function RecordEditorModal({ children, onClose }: { children: React.ReactNode; onClose: () => void }) {
   if (typeof document === "undefined") return null;
   return createPortal(
-    <div role="dialog" aria-modal="true" style={recordEditorOverlayStyle} onMouseDown={onClose}>
-      <div style={recordEditorModalStyle} onMouseDown={(e) => e.stopPropagation()}>
+    <div role="dialog" aria-modal="true" style={recordEditorOverlayStyle} onClick={onClose}>
+      <div style={recordEditorModalStyle} onClick={(e) => e.stopPropagation()}>
         {children}
       </div>
     </div>,
