@@ -345,25 +345,26 @@ function MaintenanceLog({ boat, engines, records, onChanged }: { boat: Boat; eng
 
   async function placePin(event: MouseEvent<HTMLDivElement>, target_type: TargetType, engine_id: number | null) {
     if (!placing || placing.target_type !== target_type || placing.engine_id !== engine_id) return;
-    if (systemFilter === "All") return alert("Choose a System before placing a pin so the pin knows which system it belongs to.");
     const bounds = event.currentTarget.getBoundingClientRect();
     const x = ((event.clientX - bounds.left) / bounds.width) * 100;
     const y = ((event.clientY - bounds.top) / bounds.height) * 100;
 
     if (target_type === "boat") {
-      const { data, error } = await supabase.from("maintenance_pins").insert({ boat_id: boat.id, x, y, name: "", system: systemFilter }).select().single();
+      const initialSystem = vesselSystems[0];
+      const { data, error } = await supabase.from("maintenance_pins").insert({ boat_id: boat.id, x, y, name: "", system: initialSystem }).select().single();
       if (error) return alert(`Could not save pin:\n\n${error.message}`);
       setPlacing(null);
       await loadPins();
-      setEditor({ ...emptyEditor("boat", systemFilter), pin_id: data.id });
+      setEditor({ ...emptyEditor("boat", initialSystem), pin_id: data.id });
       return;
     }
 
-    const { data, error } = await supabase.from("engine_pins").insert({ engine_id, x, y, name: "", system: systemFilter }).select().single();
+    const initialSystem = engineSystems[0];
+    const { data, error } = await supabase.from("engine_pins").insert({ engine_id, x, y, name: "", system: initialSystem }).select().single();
     if (error) return alert(`Could not save pin:\n\n${error.message}`);
     setPlacing(null);
     await loadPins();
-    setEditor({ ...emptyEditor("engine", systemFilter, engine_id), engine_pin_id: data.id });
+    setEditor({ ...emptyEditor("engine", initialSystem, engine_id), engine_pin_id: data.id });
   }
 
   function startEdit(record: MaintenanceRecord) {
@@ -516,6 +517,7 @@ function TodoView({ boat, engines, records, onChanged }: { boat: Boat; engines: 
 
 function RecordEditor({ boat, engines, state, setState, onClose, onSaved }: { boat: Boat; engines: Engine[]; state: EditorState; setState: (s: EditorState | null) => void; onClose: () => void; onSaved: () => Promise<void> }) {
   const [uploading, setUploading] = useState(false);
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const options = state.target_type === "boat" ? vesselSystems : engineSystems;
   const update = <K extends keyof EditorState>(key: K, value: EditorState[K]) => setState({ ...state, [key]: value });
   const appliesTo = state.target_type === "boat" ? "boat" : `engine:${state.engine_id ?? ""}`;
@@ -529,60 +531,73 @@ function RecordEditor({ boat, engines, state, setState, onClose, onSaved }: { bo
     setState({ ...state, target_type: "engine", engine_id, pin_id: null, system: engineSystems[0] });
   }
 
-  async function addPhotos(event: ChangeEvent<HTMLInputElement>) {
+  function addPhotos(event: ChangeEvent<HTMLInputElement>) {
     const files = Array.from(event.target.files ?? []);
     if (!files.length) return;
-    setUploading(true);
-    const added: string[] = [];
-    try {
-      for (const file of files) {
-        const path = `${boat.boat_code}/${crypto.randomUUID()}-${safeFileName(file.name) || "photo"}`;
-        const { error } = await supabase.storage.from(MAINTENANCE_PHOTO_BUCKET).upload(path, file, { upsert: false, contentType: file.type || undefined });
-        if (error) throw error;
-        added.push(path);
-      }
-      update("attachments", [...state.attachments, ...added]);
-    } catch (e) {
-      if (added.length) await supabase.storage.from(MAINTENANCE_PHOTO_BUCKET).remove(added);
-      alert(e instanceof Error ? e.message : "Photo upload failed.");
-    } finally {
-      setUploading(false);
-      event.target.value = "";
-    }
+    setPendingFiles((current) => [...current, ...files]);
+    event.target.value = "";
   }
 
   async function save() {
     if (!state.title.trim()) return alert("Enter a title.");
     if (state.target_type === "engine" && !state.engine_id) return alert("Choose an engine.");
 
-    const payload = {
-      target_type: state.target_type,
-      boat_id: state.target_type === "boat" ? boat.id : null,
-      engine_id: state.target_type === "engine" ? state.engine_id : null,
-      boat_id_at_time: state.target_type === "engine" ? boat.id : null,
-      pin_id: state.target_type === "boat" ? state.pin_id : null,
-      engine_pin_id: state.target_type === "engine" ? state.engine_pin_id : null,
-      title: state.title.trim(),
-      item: state.item.trim() || null,
-      description: state.description.trim() || null,
-      system: state.system,
-      category: state.category,
-      status: state.status,
-      date_created: state.date_created,
-      due_date: state.due_date || null,
-      completed_date: state.status === "Done" ? (state.completed_date || new Date().toISOString().slice(0, 10)) : (state.completed_date || null),
-      completed_by: state.completed_by.trim() || null,
-      work_order: state.work_order.trim() || null,
-      notes: state.notes.trim(),
-      attachments: state.attachments,
-      cost: state.cost === "" ? null : Number(state.cost),
-    };
+    setUploading(true);
+    const uploadedPaths: string[] = [];
+    try {
+      for (const file of pendingFiles) {
+        const path = `${boat.boat_code}/${crypto.randomUUID()}-${safeFileName(file.name) || "photo"}`;
+        const { error } = await supabase.storage.from(MAINTENANCE_PHOTO_BUCKET).upload(path, file, { upsert: false, contentType: file.type || undefined });
+        if (error) throw new Error(`Could not upload ${file.name}: ${error.message}`);
+        uploadedPaths.push(path);
+      }
 
-    const result = state.record_id
-      ? await supabase.from("maintenance_records").update(payload).eq("id", state.record_id)
-      : await supabase.from("maintenance_records").insert(payload);
-    if (result.error) return alert(`Could not save record:\n\n${result.error.message}`);
-    await onSaved();
+      const attachments = [...state.attachments, ...uploadedPaths];
+      const payload = {
+        target_type: state.target_type,
+        boat_id: state.target_type === "boat" ? boat.id : null,
+        engine_id: state.target_type === "engine" ? state.engine_id : null,
+        boat_id_at_time: state.target_type === "engine" ? boat.id : null,
+        pin_id: state.target_type === "boat" ? state.pin_id : null,
+        engine_pin_id: state.target_type === "engine" ? state.engine_pin_id : null,
+        title: state.title.trim(),
+        item: state.item.trim() || null,
+        description: state.description.trim() || null,
+        system: state.system,
+        category: state.category,
+        status: state.status,
+        date_created: state.date_created,
+        due_date: state.due_date || null,
+        completed_date: state.status === "Done" ? (state.completed_date || new Date().toISOString().slice(0, 10)) : (state.completed_date || null),
+        completed_by: state.completed_by.trim() || null,
+        work_order: state.work_order.trim() || null,
+        notes: state.notes.trim(),
+        attachments,
+        cost: state.cost === "" ? null : Number(state.cost),
+      };
+
+      const result = state.record_id
+        ? await supabase.from("maintenance_records").update(payload).eq("id", state.record_id)
+        : await supabase.from("maintenance_records").insert(payload);
+      if (result.error) throw new Error(`Could not save record: ${result.error.message}`);
+
+      // The System chosen in this form is the source of truth for the pin too.
+      if (state.target_type === "boat" && state.pin_id) {
+        const pinResult = await supabase.from("maintenance_pins").update({ system: state.system, name: state.title.trim() }).eq("id", state.pin_id);
+        if (pinResult.error) throw new Error(`Record saved, but the pin could not be updated: ${pinResult.error.message}`);
+      } else if (state.target_type === "engine" && state.engine_pin_id) {
+        const pinResult = await supabase.from("engine_pins").update({ system: state.system, name: state.title.trim() }).eq("id", state.engine_pin_id);
+        if (pinResult.error) throw new Error(`Record saved, but the pin could not be updated: ${pinResult.error.message}`);
+      }
+
+      setPendingFiles([]);
+      await onSaved();
+    } catch (e) {
+      if (uploadedPaths.length) await supabase.storage.from(MAINTENANCE_PHOTO_BUCKET).remove(uploadedPaths);
+      alert(e instanceof Error ? e.message : "Could not save maintenance record.");
+    } finally {
+      setUploading(false);
+    }
   }
 
   return <div style={{ ...cardStyle, marginTop: "1.25rem", borderColor: "#38bdf8" }}>
@@ -606,9 +621,10 @@ function RecordEditor({ boat, engines, state, setState, onClose, onSaved }: { bo
     </div>
     <label style={{ display: "block", marginTop: ".75rem" }}><div style={labelStyle}>Description</div><textarea value={state.description} onChange={(e) => update("description", e.target.value)} style={{ ...inputStyle, minHeight: "80px" }} /></label>
     <label style={{ display: "block", marginTop: ".75rem" }}><div style={labelStyle}>Notes</div><textarea value={state.notes} onChange={(e) => update("notes", e.target.value)} style={{ ...inputStyle, minHeight: "100px" }} /></label>
-    <label style={{ display: "block", marginTop: ".75rem" }}><div style={labelStyle}>Photos</div><input type="file" accept="image/*" multiple onChange={(e) => void addPhotos(e)} disabled={uploading} style={inputStyle} /></label>
-    {state.attachments.length > 0 && <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap", marginTop: ".75rem" }}>{state.attachments.map((path) => <a key={path} href={maintenancePhotoUrl(path)} target="_blank" rel="noreferrer" style={{ color: "#7dd3fc" }}>Photo</a>)}</div>}
-    <button onClick={() => void save()} style={{ ...buttonStyle, marginTop: "1rem" }}>{state.record_id ? "Save Changes" : "Save Record"}</button>
+    <label style={{ display: "block", marginTop: ".75rem" }}><div style={labelStyle}>Photos</div><input type="file" accept="image/*" multiple onChange={addPhotos} disabled={uploading} style={inputStyle} /></label>
+    {pendingFiles.length > 0 && <div style={{ color: "#cbd5e1", marginTop: ".5rem" }}>{pendingFiles.length} photo{pendingFiles.length === 1 ? "" : "s"} selected: {pendingFiles.map((file) => file.name).join(", ")} <span style={{ color: "#94a3b8" }}>(uploads when you save)</span></div>}
+    {state.attachments.length > 0 && <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap", marginTop: ".75rem" }}>{state.attachments.map((path) => <a key={path} href={maintenancePhotoUrl(path)} target="_blank" rel="noreferrer" style={{ color: "#7dd3fc" }}>Uploaded photo</a>)}</div>}
+    <button disabled={uploading} onClick={() => void save()} style={{ ...buttonStyle, marginTop: "1rem", opacity: uploading ? .65 : 1 }}>{uploading ? "Uploading & Saving…" : state.record_id ? "Save Changes" : "Save Record"}</button>
   </div>;
 }
 
