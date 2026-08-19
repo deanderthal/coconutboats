@@ -463,7 +463,11 @@ function MaintenanceLog({ boat, engines, records, onChanged }: { boat: Boat; eng
       {filteredRecords.length ? filteredRecords.map((record) => <RecordCard key={record.id} record={record} engines={engines} onEdit={() => startEdit(record)} onDelete={() => void deleteRecord(record)} onPhoto={setSelectedPhotoUrl} />) : <div style={cardStyle}>No records match this system.</div>}
     </div>
 
-    {editor && <RecordEditor boat={boat} engines={engines} state={editor} setState={setEditor} onClose={() => setEditor(null)} onSaved={async () => { setEditor(null); await onChanged(); }} />}
+    {editor && <div style={recordEditorOverlayStyle} onClick={() => setEditor(null)}>
+      <div style={recordEditorModalStyle} onClick={(e) => e.stopPropagation()}>
+        <RecordEditor boat={boat} engines={engines} state={editor} setState={setEditor} onClose={() => setEditor(null)} onSaved={async () => { setEditor(null); await onChanged(); }} />
+      </div>
+    </div>}
     {selectedPhotoUrl && <div onClick={() => setSelectedPhotoUrl(null)} style={photoOverlayStyle}><img src={selectedPhotoUrl} alt="Maintenance attachment" onClick={(e) => e.stopPropagation()} style={{ maxWidth: "95vw", maxHeight: "90vh", objectFit: "contain", borderRadius: "10px" }} /></div>}
   </section>;
 }
@@ -696,4 +700,6 @@ const cardStyle = { background: "#020617", border: "1px solid #334155", borderRa
 const inputStyle = { width: "100%", minWidth: 0, minHeight: "46px", boxSizing: "border-box" as const, padding: ".75rem", borderRadius: "8px", border: "1px solid #334155", background: "#020617", color: "#f8fafc" };
 const buttonStyle = { padding: ".75rem 1rem", borderRadius: "10px", border: "none", background: "#2563eb", color: "white", fontWeight: 700, cursor: "pointer" };
 const dangerButtonStyle = { ...buttonStyle, background: "#991b1b" };
+const recordEditorOverlayStyle = { position: "fixed" as const, inset: 0, zIndex: 45, display: "grid", placeItems: "center", background: "rgba(0,0,0,.72)", padding: "1rem" };
+const recordEditorModalStyle = { width: "min(980px, 96vw)", maxHeight: "92vh", overflowY: "auto" as const, borderRadius: "12px" };
 const photoOverlayStyle = { position: "fixed" as const, inset: 0, zIndex: 50, display: "grid", placeItems: "center", background: "rgba(0,0,0,.88)", padding: "1rem", cursor: "pointer" };
