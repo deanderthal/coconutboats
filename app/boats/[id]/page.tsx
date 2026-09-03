@@ -82,6 +82,7 @@ type MaintenanceRecord = {
   date_created: string;
   due_date: string | null;
   completed_date: string | null;
+  completed_at: string | null;
   completed_by: string | null;
   work_order: string | null;
   notes: string;
@@ -104,6 +105,7 @@ type EditorState = {
   date_created: string;
   due_date: string;
   completed_date: string;
+  completed_at: string | null;
   completed_by: string;
   work_order: string;
   notes: string;
@@ -123,9 +125,10 @@ const emptyEditor = (target_type: TargetType = "boat", system?: string, engine_i
   system: system ?? (target_type === "engine" ? engineSystems[0] : vesselSystems[0]),
   category: "Repair",
   status: "Open Issue",
-  date_created: new Date().toISOString().slice(0, 10),
+  date_created: hawaiiDate(),
   due_date: "",
   completed_date: "",
+  completed_at: null,
   completed_by: "",
   work_order: "",
   notes: "",
@@ -232,8 +235,36 @@ export default function BoatPage({ params }: { params: Promise<{ id: string }> }
 }
 
 function Overview({ boat, engines, onChanged }: { boat: Boat; engines: Engine[]; onChanged: () => Promise<void> }) {
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [form, setForm] = useState({ ...boat });
+
+  async function saveBoat() {
+    if (!form.name.trim() || !form.boat_code.trim()) return alert("Vessel name and Boat ID are required.");
+    setSaving(true);
+    const values = {
+      boat_code: form.boat_code.trim(), name: form.name.trim(), nickname: form.nickname?.trim() || null,
+      type: form.type.trim(), status: form.status, location: form.location.trim(), make: form.make?.trim() || null,
+      model: form.model?.trim() || null, year: form.year?.trim() || null, length: form.length?.trim() || null,
+      hull_number: form.hull_number?.trim() || null, registration: form.registration?.trim() || null,
+      fuel_capacity: form.fuel_capacity?.trim() || null, battery_type: form.battery_type?.trim() || null,
+      photo: form.photo?.trim() || null, schematic: form.schematic?.trim() || null, notes: form.notes?.trim() || null,
+    };
+    const { error } = await supabase.from("boats").update(values).eq("id", boat.id);
+    setSaving(false);
+    if (error) return alert(`Could not save vessel details:\n\n${error.message}`);
+    setEditing(false);
+    await onChanged();
+  }
+
+  const field = (key: keyof Boat, label: string) => <label><div style={labelStyle}>{label}</div><input value={String(form[key] ?? "")} onChange={(e) => setForm({ ...form, [key]: e.target.value })} style={inputStyle} /></label>;
+
   return (
     <section style={panelStyle}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "1rem", marginBottom: "1rem" }}>
+        <h2 style={{ margin: 0 }}>Vessel Overview</h2>
+        <button style={buttonStyle} onClick={() => { setForm({ ...boat }); setEditing(true); }}>Edit Vessel Details</button>
+      </div>
       <div className="responsive-grid">
         <div>
           {boat.photo ? <img src={boat.photo} alt={boat.name} style={{ width: "100%", borderRadius: "16px", display: "block" }} /> : <div style={cardStyle}>No vessel photo entered.</div>}
@@ -264,6 +295,18 @@ function Overview({ boat, engines, onChanged }: { boat: Boat; engines: Engine[];
         <h3 style={{ marginTop: 0 }}>Notes</h3>
         <p style={{ color: "#cbd5e1", marginBottom: 0 }}>{boat.notes ?? "No notes entered."}</p>
       </div>
+      {editing && <RecordEditorModal onClose={() => setEditing(false)}>
+        <div style={cardStyle}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: "1rem" }}><h2 style={{ marginTop: 0 }}>Edit Vessel Details</h2><button style={{ ...buttonStyle, background: "#475569" }} onClick={() => setEditing(false)}>Close</button></div>
+          <div className="responsive-grid-equal">
+            {field("boat_code", "Boat ID")}{field("name", "Name")}{field("nickname", "Nickname")}{field("type", "Vessel Type")}
+            <label><div style={labelStyle}>Status</div><select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value as Boat["status"] })} style={inputStyle}><option>Active</option><option>Inactive</option></select></label>
+            {field("location", "Location")}{field("make", "Make")}{field("model", "Model")}{field("year", "Year")}{field("length", "Length")}{field("hull_number", "Hull Number")}{field("registration", "Registration")}{field("fuel_capacity", "Fuel Capacity")}{field("battery_type", "Battery Type")}{field("photo", "Photo URL")}{field("schematic", "Schematic URL")}
+          </div>
+          <label style={{ display: "block", marginTop: ".75rem" }}><div style={labelStyle}>Notes</div><textarea value={form.notes ?? ""} onChange={(e) => setForm({ ...form, notes: e.target.value })} style={{ ...inputStyle, minHeight: "110px" }} /></label>
+          <button disabled={saving} style={{ ...buttonStyle, marginTop: "1rem", opacity: saving ? .65 : 1 }} onClick={() => void saveBoat()}>{saving ? "Saving…" : "Save Vessel Details"}</button>
+        </div>
+      </RecordEditorModal>}
     </section>
   );
 }
@@ -309,6 +352,8 @@ function MaintenanceLog({ boat, engines, records, onChanged }: { boat: Boat; eng
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [selectedPin, setSelectedPin] = useState<{ pin: Pin; target_type: TargetType; engine_id: number | null } | null>(null);
   const [selectedPhotoUrl, setSelectedPhotoUrl] = useState<string | null>(null);
+  const [draftPin, setDraftPin] = useState<{ target_type: TargetType; id: number } | null>(null);
+  const [reportPeriod, setReportPeriod] = useState("30");
 
   const targetType: TargetType = maintenanceTab === "Vessel Maintenance" ? "boat" : "engine";
   const baseSystems = targetType === "boat" ? vesselSystems : engineSystems;
@@ -358,6 +403,7 @@ function MaintenanceLog({ boat, engines, records, onChanged }: { boat: Boat; eng
       setPlacing(null);
       await loadPins();
       setEditor({ ...emptyEditor("boat", initialSystem), pin_id: data.id });
+      setDraftPin({ target_type: "boat", id: data.id });
       return;
     }
 
@@ -367,6 +413,7 @@ function MaintenanceLog({ boat, engines, records, onChanged }: { boat: Boat; eng
     setPlacing(null);
     await loadPins();
     setEditor({ ...emptyEditor("engine", initialSystem, engine_id), engine_pin_id: data.id });
+    setDraftPin({ target_type: "engine", id: data.id });
   }
 
   function openBoatPin(pin: Pin) {
@@ -379,6 +426,7 @@ function MaintenanceLog({ boat, engines, records, onChanged }: { boat: Boat; eng
 
   function addRecordToSelectedPin() {
     if (!selectedPin) return;
+    setDraftPin(null);
     if (selectedPin.target_type === "boat") {
       setEditor({ ...emptyEditor("boat", selectedPin.pin.system), pin_id: selectedPin.pin.id });
       return;
@@ -387,6 +435,7 @@ function MaintenanceLog({ boat, engines, records, onChanged }: { boat: Boat; eng
   }
 
   function startEdit(record: MaintenanceRecord) {
+    setDraftPin(null);
     setEditor(toEditorState(record));
   }
 
@@ -396,6 +445,44 @@ function MaintenanceLog({ boat, engines, records, onChanged }: { boat: Boat; eng
     if (error) return alert(`Could not delete record:\n\n${error.message}`);
     if (record.attachments?.length) await supabase.storage.from(MAINTENANCE_PHOTO_BUCKET).remove(record.attachments);
     await onChanged();
+    await loadPins();
+  }
+
+  async function deleteEmptyPin() {
+    if (!selectedPin || selectedPinRecords.length) return;
+    if (!confirm("Delete this empty pin?")) return;
+    const table = selectedPin.target_type === "boat" ? "maintenance_pins" : "engine_pins";
+    const { error } = await supabase.from(table).delete().eq("id", selectedPin.pin.id);
+    if (error) return alert(`Could not delete pin:\n\n${error.message}`);
+    setSelectedPin(null);
+    await loadPins();
+  }
+
+  async function closeEditor() {
+    if (draftPin) {
+      const table = draftPin.target_type === "boat" ? "maintenance_pins" : "engine_pins";
+      await supabase.from(table).delete().eq("id", draftPin.id);
+      setDraftPin(null);
+      await loadPins();
+    }
+    setEditor(null);
+  }
+
+  function exportCompletedReport() {
+    const cutoff = reportPeriod === "all" ? null : new Date(Date.now() - Number(reportPeriod) * 86400000);
+    const done = records.filter((record) => {
+      if (record.status !== "Done") return false;
+      if (!record.completed_at && !record.completed_date) return false;
+      const completed = new Date(record.completed_at ?? `${record.completed_date}T12:00:00-10:00`);
+      return !cutoff || completed >= cutoff;
+    });
+    const engineById = Object.fromEntries(engines.map((engine) => [engine.id, engine]));
+    downloadCsv(`${boat.boat_code}-completed-work-${reportPeriod === "all" ? "all-time" : `last-${reportPeriod}-days`}.csv`, done.map((record) => ({
+      boat_code: boat.boat_code, completed_at: record.completed_at ?? "", completed_date: record.completed_date ?? "",
+      record_type: record.target_type === "engine" ? "Engine" : "Vessel", engine_code: record.engine_id ? engineById[record.engine_id]?.engine_code ?? "" : "",
+      title: record.title, item: record.item ?? "", system: record.system, category: record.category, completed_by: record.completed_by ?? "",
+      work_order: record.work_order ?? "", cost: record.cost ?? "", description: record.description ?? "", notes: record.notes ?? "",
+    })));
   }
 
   function exportCsv() {
@@ -423,6 +510,7 @@ function MaintenanceLog({ boat, engines, records, onChanged }: { boat: Boat; eng
   }
 
   function addRecord() {
+    setDraftPin(null);
     const selectedSystem = systemFilter === "All" ? baseSystems[0] : systemFilter;
     if (targetType === "engine" && !engines.length) return alert("No engines are assigned to this vessel yet.");
     setEditor(emptyEditor(targetType, selectedSystem, targetType === "engine" ? engines[0]?.id ?? null : null));
@@ -437,6 +525,10 @@ function MaintenanceLog({ boat, engines, records, onChanged }: { boat: Boat; eng
     : [];
 
   return <section style={panelStyle}>
+    <div style={{ ...cardStyle, marginBottom: "1rem", display: "flex", alignItems: "end", justifyContent: "space-between", gap: "1rem", flexWrap: "wrap" }}>
+      <div><h3 style={{ margin: 0 }}>Completed Work Report</h3><div style={{ color: "#94a3b8", marginTop: ".35rem" }}>Export completed vessel and engine work for this boat.</div></div>
+      <div style={{ display: "flex", gap: ".5rem", alignItems: "end", flexWrap: "wrap" }}><label><div style={labelStyle}>Period</div><select value={reportPeriod} onChange={(e) => setReportPeriod(e.target.value)} style={inputStyle}><option value="7">Last 7 days</option><option value="30">Last 30 days</option><option value="365">Last year</option><option value="all">All time</option></select></label><button style={{ ...buttonStyle, background: "#0f766e" }} onClick={exportCompletedReport}>Export Completed CSV</button></div>
+    </div>
     <nav className="maintenance-tabs" aria-label="Maintenance type">
       {maintenanceTabs.map((tab) => <button key={tab} type="button" onClick={() => switchMaintenanceTab(tab)} className={`maintenance-tab ${maintenanceTab === tab ? "maintenance-tab-active" : ""}`}>{tab}</button>)}
     </nav>
@@ -500,16 +592,17 @@ function MaintenanceLog({ boat, engines, records, onChanged }: { boat: Boat; eng
       onAddRecord={addRecordToSelectedPin}
       onEdit={(record) => setEditor(toEditorState(record))}
       onDelete={(record) => void deleteRecord(record)}
+      onDeletePin={() => void deleteEmptyPin()}
       onPhoto={setSelectedPhotoUrl}
     />}
-    {editor && <RecordEditorModal onClose={() => setEditor(null)}>
-      <RecordEditor boat={boat} engines={engines} state={editor} setState={setEditor} onClose={() => setEditor(null)} onSaved={async () => { setEditor(null); await onChanged(); }} />
+    {editor && <RecordEditorModal onClose={() => void closeEditor()}>
+      <RecordEditor boat={boat} engines={engines} state={editor} setState={setEditor} onClose={() => void closeEditor()} onSaved={async () => { setDraftPin(null); setEditor(null); await onChanged(); await loadPins(); }} />
     </RecordEditorModal>}
     {selectedPhotoUrl && <div onClick={() => setSelectedPhotoUrl(null)} style={photoOverlayStyle}><img src={selectedPhotoUrl} alt="Maintenance attachment" onClick={(e) => e.stopPropagation()} style={{ maxWidth: "95vw", maxHeight: "90vh", objectFit: "contain", borderRadius: "10px" }} /></div>}
   </section>;
 }
 
-function PinHistoryModal({ pin, target_type, engine, records, engines, onClose, onAddRecord, onEdit, onDelete, onPhoto }: {
+function PinHistoryModal({ pin, target_type, engine, records, engines, onClose, onAddRecord, onEdit, onDelete, onDeletePin, onPhoto }: {
   pin: Pin;
   target_type: TargetType;
   engine: Engine | null;
@@ -519,6 +612,7 @@ function PinHistoryModal({ pin, target_type, engine, records, engines, onClose, 
   onAddRecord: () => void;
   onEdit: (record: MaintenanceRecord) => void;
   onDelete: (record: MaintenanceRecord) => void;
+  onDeletePin: () => void;
   onPhoto: (url: string) => void;
 }) {
   if (typeof document === "undefined") return null;
@@ -535,6 +629,7 @@ function PinHistoryModal({ pin, target_type, engine, records, engines, onClose, 
           </div>
           <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap" }}>
             <button style={buttonStyle} onClick={onAddRecord}>Add a Record</button>
+            {!records.length && <button style={dangerButtonStyle} onClick={onDeletePin}>Delete Empty Pin</button>}
             <button style={{ ...buttonStyle, background: "#475569" }} onClick={onClose}>Close</button>
           </div>
         </div>
@@ -575,7 +670,7 @@ function TodoView({ boat, engines, records, onChanged }: { boat: Boat; engines: 
   const scheduled = records.filter((record) => record.status === "Scheduled" && (isOverdue(record.due_date) || isWithinDays(record.due_date, DUE_SOON_DAYS))).sort(sortDue);
 
   async function markDone(record: MaintenanceRecord) {
-    const { error } = await supabase.from("maintenance_records").update({ status: "Done", completed_date: new Date().toISOString().slice(0, 10) }).eq("id", record.id);
+    const { error } = await supabase.from("maintenance_records").update({ status: "Done", completed_date: hawaiiDate(), completed_at: new Date().toISOString() }).eq("id", record.id);
     if (error) return alert(`Could not update record:\n\n${error.message}`);
     await onChanged();
   }
@@ -668,7 +763,8 @@ function RecordEditor({ boat, engines, state, setState, onClose, onSaved }: { bo
         status: state.status,
         date_created: state.date_created,
         due_date: state.due_date || null,
-        completed_date: state.status === "Done" ? (state.completed_date || new Date().toISOString().slice(0, 10)) : (state.completed_date || null),
+        completed_date: state.status === "Done" ? (state.completed_date || hawaiiDate()) : null,
+        completed_at: state.status === "Done" ? (state.completed_at || new Date().toISOString()) : null,
         completed_by: state.completed_by.trim() || null,
         work_order: state.work_order.trim() || null,
         notes: state.notes.trim(),
@@ -758,6 +854,7 @@ function toEditorState(record: MaintenanceRecord): EditorState {
     date_created: record.date_created,
     due_date: record.due_date ?? "",
     completed_date: record.completed_date ?? "",
+    completed_at: record.completed_at ?? null,
     completed_by: record.completed_by ?? "",
     work_order: record.work_order ?? "",
     notes: record.notes ?? "",
@@ -774,6 +871,11 @@ function recordTargetLabel(record: MaintenanceRecord, engines: Engine[]) {
 function sortDue(a: MaintenanceRecord, b: MaintenanceRecord) { return (a.due_date || "9999-99-99").localeCompare(b.due_date || "9999-99-99"); }
 function statusDot(status: Status) { return status === "Open Issue" ? "🔴" : status === "Scheduled" ? "🔵" : "✅"; }
 function formatDate(date: string) { if (!date) return "No date"; const [y,m,d] = date.split("-"); return new Date(Number(y), Number(m)-1, Number(d)).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); }
+function hawaiiDate(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone: "Pacific/Honolulu", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date);
+  const value = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${value.year}-${value.month}-${value.day}`;
+}
 function downloadCsv(filename: string, rows: Record<string, unknown>[]) {
   if (!rows.length) return alert("There are no records to export.");
   const headers = Object.keys(rows[0]);

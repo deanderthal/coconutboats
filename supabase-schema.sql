@@ -64,6 +64,7 @@ create table if not exists public.maintenance_records (
   date_created date not null default current_date,
   due_date date,
   completed_date date,
+  completed_at timestamptz,
   completed_by text,
   work_order text,
   notes text not null default '',

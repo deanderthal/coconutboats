@@ -42,3 +42,11 @@ For the Vessel Maintenance / Engine Maintenance split, run:
 `upgrade-2026-08-unified-maintenance.sql`
 
 This moves any rows from the temporary `engine_maintenance_records` table into `maintenance_records`, then removes the separate table. Vessel and engine repairs now use one form and one maintenance table. Engine records use `engine_id`; vessel records use `boat_id`.
+
+## September 2026 overview, pin, time, and reporting upgrade
+
+Before deploying this version, run this once in Supabase SQL Editor:
+
+`upgrade-2026-09-editing-pins-reports.sql`
+
+It adds the exact `completed_at` timestamp used by completed-work reports, backfills existing completed records, and automatically removes a schematic pin when its final maintenance record is deleted. The app now uses the Hawaiʻi calendar date when creating or completing records, allows vessel details to be edited from Overview, and exports completed-work CSV reports for the last 7, 30, or 365 days or all time.
