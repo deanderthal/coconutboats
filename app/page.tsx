@@ -98,22 +98,19 @@ export default function FleetPage() {
 
 ${recordsError?.message ?? enginesError?.message}`);
 
-    const cutoff = reportPeriod === "all" ? null : new Date(Date.now() - Number(reportPeriod) * 86400000);
+    const cutoff = reportPeriod === "all" ? null : completedDateCutoff(Number(reportPeriod));
     const boatById = Object.fromEntries(boats.map((boat) => [boat.id, boat]));
     const engineById = Object.fromEntries((engineRows ?? []).map((engine) => [engine.id, engine]));
-    const rows = (records ?? []).filter((record) => {
-      if (!record.completed_at && !record.completed_date) return false;
-      const completed = new Date(record.completed_at ?? `${record.completed_date}T12:00:00-10:00`);
-      return !cutoff || completed >= cutoff;
-    }).map((record) => {
+    const rows = (records ?? []).filter((record) => !!record.completed_date && (!cutoff || record.completed_date >= cutoff)).map((record) => {
       const boatId = record.boat_id ?? record.boat_id_at_time;
       const boat = boatId ? boatById[boatId] : undefined;
       return {
-        boat_code: boat?.boat_code ?? "", boat_name: boat?.name ?? "", completed_at: record.completed_at ?? "", completed_date: record.completed_date ?? "",
+        completed_date: record.completed_date ?? "", boat: boat?.name ?? "", title: record.title,
         record_type: record.target_type === "engine" ? "Engine" : "Vessel", engine_code: record.engine_id ? engineById[record.engine_id]?.engine_code ?? "" : "",
-        title: record.title, system: record.system, category: record.category, completed_by: record.completed_by ?? "", work_order: record.work_order ?? "", cost: record.cost ?? "", notes: record.notes ?? "",
+        system: record.system, category: record.category, completed_by: record.completed_by ?? "", cost: record.cost ?? "", notes: record.notes ?? "",
+        boat_code: boat?.boat_code ?? "", work_order: record.work_order ?? "",
       };
-    });
+    }).sort((a, b) => b.completed_date.localeCompare(a.completed_date) || a.boat.localeCompare(b.boat) || a.title.localeCompare(b.title));
     downloadCsv(`fleet-completed-work-${reportPeriod === "all" ? "all-time" : `last-${reportPeriod}-days`}.csv`, rows);
   }
 
@@ -433,6 +430,19 @@ ${recordsError?.message ?? enginesError?.message}`);
     </main>
   );
 }
+function hawaiiDate(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone: "Pacific/Honolulu", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date);
+  const value = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${value.year}-${value.month}-${value.day}`;
+}
+
+function completedDateCutoff(days: number) {
+  const [year, month, day] = hawaiiDate().split("-").map(Number);
+  const cutoff = new Date(Date.UTC(year, month - 1, day));
+  cutoff.setUTCDate(cutoff.getUTCDate() - days);
+  return cutoff.toISOString().slice(0, 10);
+}
+
 function downloadCsv(filename: string, rows: Record<string, unknown>[]) {
   if (!rows.length) return alert("There are no completed records to export for that period.");
   const headers = Object.keys(rows[0]);

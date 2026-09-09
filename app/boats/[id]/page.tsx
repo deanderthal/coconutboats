@@ -326,23 +326,20 @@ ${error instanceof Error ? error.message : "Unknown error"}`);
       </div>
 
       <h2 style={{ marginTop: "1.5rem" }}>Installed Engines</h2>
-      <div style={{ ...cardStyle, marginBottom: "1rem" }}>
-        <h3 style={{ marginTop: 0 }}>Change Installed Engines</h3>
-        <p style={{ color: "#94a3b8", marginTop: 0 }}>Choose an available motor for each position. Removing a motor keeps its hours and maintenance history in the engine inventory.</p>
+      {engines.length ? <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: "1rem" }}>
+        {engines.map((engine) => <EngineCard key={engine.id} engine={engine} engineInventory={engineInventory} boatId={boat.id} assigningEngine={assigningEngine} onAssign={assignEngine} onChanged={onChanged} />)}
+      </div> : <div style={cardStyle}>
+        <p style={{ color: "#cbd5e1", marginTop: 0 }}>No engines are currently assigned to this boat.</p>
         <div className="responsive-grid-equal">
           {(["Single", "Port", "Starboard"] as const).map((position) => {
-            const current = engines.find((engine) => engine.position === position);
-            const available = engineInventory.filter((engine) => engine.boat_id == null || engine.boat_id === boat.id);
-            return <label key={position}><div style={labelStyle}>{position}</div><select disabled={assigningEngine} value={current?.id ?? ""} onChange={(e) => void assignEngine(position, e.target.value)} style={inputStyle}>
-              <option value="">No engine</option>
+            const available = engineInventory.filter((engine) => engine.boat_id == null);
+            return <label key={position}><div style={labelStyle}>{position} Engine</div><select disabled={assigningEngine} value="" onChange={(e) => void assignEngine(position, e.target.value)} style={inputStyle}>
+              <option value="">Select an engine…</option>
               {available.map((engine) => <option key={engine.id} value={engine.id}>{engine.engine_code} · {[engine.make, engine.model].filter(Boolean).join(" ") || "Engine"}{engine.horsepower ? ` · ${engine.horsepower} hp` : ""}</option>)}
             </select></label>;
           })}
         </div>
-      </div>
-      {engines.length ? <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: "1rem" }}>
-        {engines.map((engine) => <EngineCard key={engine.id} engine={engine} onChanged={onChanged} />)}
-      </div> : <div style={cardStyle}>No engines are currently assigned to this boat.</div>}
+      </div>}
 
       <div style={{ ...cardStyle, marginTop: "1.5rem" }}>
         <h3 style={{ marginTop: 0 }}>Notes</h3>
@@ -364,7 +361,7 @@ ${error instanceof Error ? error.message : "Unknown error"}`);
   );
 }
 
-function EngineCard({ engine, onChanged }: { engine: Engine; onChanged: () => Promise<void> }) {
+function EngineCard({ engine, engineInventory, boatId, assigningEngine, onAssign, onChanged }: { engine: Engine; engineInventory: Engine[]; boatId: number; assigningEngine: boolean; onAssign: (position: Engine["position"], engineId: string) => Promise<void>; onChanged: () => Promise<void> }) {
   const [lifetime_hours, setLifetime] = useState(String(engine.lifetime_hours ?? 0));
   const [service_hours, setService] = useState(String(engine.service_hours ?? 0));
   const serviceDue = isEngineServiceDue({ ...engine, service_hours: Number(service_hours) });
@@ -392,6 +389,14 @@ function EngineCard({ engine, onChanged }: { engine: Engine; onChanged: () => Pr
         <button style={buttonStyle} onClick={() => void saveHours(false)}>Save Hours</button>
         <button style={{ ...buttonStyle, background: "#475569" }} onClick={() => void saveHours(true)}>Reset Since Service</button>
       </div>
+      <label style={{ display: "block", marginTop: "1rem", paddingTop: "1rem", borderTop: "1px solid #1e293b" }}>
+        <div style={labelStyle}>Installed Motor</div>
+        <select disabled={assigningEngine} value={engine.id} onChange={(e) => void onAssign(engine.position, e.target.value)} style={inputStyle}>
+          <option value="">No engine</option>
+          {engineInventory.filter((item) => item.boat_id == null || item.boat_id === boatId).map((item) => <option key={item.id} value={item.id}>{item.engine_code} · {[item.make, item.model].filter(Boolean).join(" ") || "Engine"}{item.horsepower ? ` · ${item.horsepower} hp` : ""}</option>)}
+        </select>
+        <div style={{ color: "#64748b", fontSize: ".85rem", marginTop: ".35rem" }}>Changing this keeps the motor’s hours and maintenance history with the motor.</div>
+      </label>
     </div>
   </div>;
 }
@@ -522,19 +527,15 @@ function MaintenanceLog({ boat, engines, records, onChanged }: { boat: Boat; eng
   }
 
   function exportCompletedReport() {
-    const cutoff = reportPeriod === "all" ? null : new Date(Date.now() - Number(reportPeriod) * 86400000);
-    const done = records.filter((record) => {
-      if (record.status !== "Done") return false;
-      if (!record.completed_at && !record.completed_date) return false;
-      const completed = new Date(record.completed_at ?? `${record.completed_date}T12:00:00-10:00`);
-      return !cutoff || completed >= cutoff;
-    });
+    const cutoff = reportPeriod === "all" ? null : completedDateCutoff(Number(reportPeriod));
+    const done = records.filter((record) => record.status === "Done" && !!record.completed_date && (!cutoff || record.completed_date >= cutoff))
+      .sort((a, b) => (b.completed_date ?? "").localeCompare(a.completed_date ?? ""));
     const engineById = Object.fromEntries(engines.map((engine) => [engine.id, engine]));
     downloadCsv(`${boat.boat_code}-completed-work-${reportPeriod === "all" ? "all-time" : `last-${reportPeriod}-days`}.csv`, done.map((record) => ({
-      boat_code: boat.boat_code, completed_at: record.completed_at ?? "", completed_date: record.completed_date ?? "",
+      completed_date: record.completed_date ?? "", boat_code: boat.boat_code, title: record.title,
       record_type: record.target_type === "engine" ? "Engine" : "Vessel", engine_code: record.engine_id ? engineById[record.engine_id]?.engine_code ?? "" : "",
-      title: record.title, system: record.system, category: record.category, completed_by: record.completed_by ?? "",
-      work_order: record.work_order ?? "", cost: record.cost ?? "", notes: record.notes ?? "",
+      system: record.system, category: record.category, completed_by: record.completed_by ?? "", cost: record.cost ?? "",
+      notes: record.notes ?? "", work_order: record.work_order ?? "",
     })));
   }
 
@@ -924,6 +925,12 @@ function hawaiiDate(date = new Date()) {
   const parts = new Intl.DateTimeFormat("en-US", { timeZone: "Pacific/Honolulu", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date);
   const value = Object.fromEntries(parts.map((part) => [part.type, part.value]));
   return `${value.year}-${value.month}-${value.day}`;
+}
+function completedDateCutoff(days: number) {
+  const [year, month, day] = hawaiiDate().split("-").map(Number);
+  const cutoff = new Date(Date.UTC(year, month - 1, day));
+  cutoff.setUTCDate(cutoff.getUTCDate() - days);
+  return cutoff.toISOString().slice(0, 10);
 }
 function downloadCsv(filename: string, rows: Record<string, unknown>[]) {
   if (!rows.length) return alert("There are no records to export.");
