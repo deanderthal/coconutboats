@@ -14,7 +14,7 @@ const categories = ["Repair", "Routine Maintenance", "Observation", "Admin"] as 
 const statuses = ["Open Issue", "Scheduled", "Done"] as const;
 
 const vesselSystems = [
-  "Sponsons", "Speed Tube", "Hull", "Deck", "Fuel System", "Electrical",
+  "Hull", "Deck", "Fuel System", "Electrical",
   "Helm / Controls", "Console", "Equipment", "Trailer", "Administrative",
 ];
 
@@ -238,6 +238,45 @@ function Overview({ boat, engines, onChanged }: { boat: Boat; engines: Engine[];
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState({ ...boat });
+  const [engineInventory, setEngineInventory] = useState<Engine[]>([]);
+  const [assigningEngine, setAssigningEngine] = useState(false);
+
+  async function loadEngineInventory() {
+    const { data, error } = await supabase.from("engines").select("*").order("engine_code");
+    if (error) {
+      console.error("Could not load engine inventory:", error);
+      return;
+    }
+    setEngineInventory((data ?? []) as Engine[]);
+  }
+
+  useEffect(() => { void loadEngineInventory(); }, [boat.id]);
+
+  async function assignEngine(position: Engine["position"], engineId: string) {
+    setAssigningEngine(true);
+    try {
+      const current = engines.find((engine) => engine.position === position);
+      const nextId = engineId ? Number(engineId) : null;
+
+      if (current && current.id !== nextId) {
+        const { error } = await supabase.from("engines").update({ boat_id: null, position: "Other" }).eq("id", current.id);
+        if (error) throw error;
+      }
+
+      if (nextId) {
+        const { error } = await supabase.from("engines").update({ boat_id: boat.id, position }).eq("id", nextId);
+        if (error) throw error;
+      }
+
+      await Promise.all([onChanged(), loadEngineInventory()]);
+    } catch (error) {
+      alert(`Could not change engine assignment:
+
+${error instanceof Error ? error.message : "Unknown error"}`);
+    } finally {
+      setAssigningEngine(false);
+    }
+  }
 
   async function saveBoat() {
     if (!form.name.trim() || !form.boat_code.trim()) return alert("Vessel name and Boat ID are required.");
@@ -287,9 +326,23 @@ function Overview({ boat, engines, onChanged }: { boat: Boat; engines: Engine[];
       </div>
 
       <h2 style={{ marginTop: "1.5rem" }}>Installed Engines</h2>
+      <div style={{ ...cardStyle, marginBottom: "1rem" }}>
+        <h3 style={{ marginTop: 0 }}>Change Installed Engines</h3>
+        <p style={{ color: "#94a3b8", marginTop: 0 }}>Choose an available motor for each position. Removing a motor keeps its hours and maintenance history in the engine inventory.</p>
+        <div className="responsive-grid-equal">
+          {(["Single", "Port", "Starboard"] as const).map((position) => {
+            const current = engines.find((engine) => engine.position === position);
+            const available = engineInventory.filter((engine) => engine.boat_id == null || engine.boat_id === boat.id);
+            return <label key={position}><div style={labelStyle}>{position}</div><select disabled={assigningEngine} value={current?.id ?? ""} onChange={(e) => void assignEngine(position, e.target.value)} style={inputStyle}>
+              <option value="">No engine</option>
+              {available.map((engine) => <option key={engine.id} value={engine.id}>{engine.engine_code} · {[engine.make, engine.model].filter(Boolean).join(" ") || "Engine"}{engine.horsepower ? ` · ${engine.horsepower} hp` : ""}</option>)}
+            </select></label>;
+          })}
+        </div>
+      </div>
       {engines.length ? <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: "1rem" }}>
         {engines.map((engine) => <EngineCard key={engine.id} engine={engine} onChanged={onChanged} />)}
-      </div> : <div style={cardStyle}>No engines are currently assigned to this boat. Assign them in Supabase by setting <code>engines.boat_id</code> and <code>position</code>.</div>}
+      </div> : <div style={cardStyle}>No engines are currently assigned to this boat.</div>}
 
       <div style={{ ...cardStyle, marginTop: "1.5rem" }}>
         <h3 style={{ marginTop: 0 }}>Notes</h3>
@@ -480,8 +533,8 @@ function MaintenanceLog({ boat, engines, records, onChanged }: { boat: Boat; eng
     downloadCsv(`${boat.boat_code}-completed-work-${reportPeriod === "all" ? "all-time" : `last-${reportPeriod}-days`}.csv`, done.map((record) => ({
       boat_code: boat.boat_code, completed_at: record.completed_at ?? "", completed_date: record.completed_date ?? "",
       record_type: record.target_type === "engine" ? "Engine" : "Vessel", engine_code: record.engine_id ? engineById[record.engine_id]?.engine_code ?? "" : "",
-      title: record.title, item: record.item ?? "", system: record.system, category: record.category, completed_by: record.completed_by ?? "",
-      work_order: record.work_order ?? "", cost: record.cost ?? "", description: record.description ?? "", notes: record.notes ?? "",
+      title: record.title, system: record.system, category: record.category, completed_by: record.completed_by ?? "",
+      work_order: record.work_order ?? "", cost: record.cost ?? "", notes: record.notes ?? "",
     })));
   }
 
@@ -493,8 +546,6 @@ function MaintenanceLog({ boat, engines, records, onChanged }: { boat: Boat; eng
       engine_code: record.engine_id ? engineById[record.engine_id]?.engine_code ?? "" : "",
       engine_position: record.engine_id ? engineById[record.engine_id]?.position ?? "" : "",
       title: record.title,
-      item: record.item ?? "",
-      description: record.description ?? "",
       system: record.system,
       category: record.category,
       status: record.status,
@@ -756,8 +807,8 @@ function RecordEditor({ boat, engines, state, setState, onClose, onSaved }: { bo
         pin_id: state.target_type === "boat" ? state.pin_id : null,
         engine_pin_id: state.target_type === "engine" ? state.engine_pin_id : null,
         title: state.title.trim(),
-        item: state.item.trim() || null,
-        description: state.description.trim() || null,
+        item: null,
+        description: null,
         system: state.system,
         category: state.category,
         status: state.status,
@@ -805,7 +856,6 @@ function RecordEditor({ boat, engines, state, setState, onClose, onSaved }: { bo
       </select></label>
       <label><div style={labelStyle}>System</div><select value={state.system} onChange={(e) => update("system", e.target.value)} style={inputStyle}>{Array.from(new Set([...options, state.system])).map((system) => <option key={system}>{system}</option>)}</select></label>
       <label><div style={labelStyle}>Title</div><input value={state.title} onChange={(e) => update("title", e.target.value)} style={inputStyle} /></label>
-      <label><div style={labelStyle}>Item</div><input value={state.item} onChange={(e) => update("item", e.target.value)} style={inputStyle} /></label>
       <label><div style={labelStyle}>Category</div><select value={state.category} onChange={(e) => update("category", e.target.value as Category)} style={inputStyle}>{categories.map((category) => <option key={category}>{category}</option>)}</select></label>
       <label><div style={labelStyle}>Status</div><select value={state.status} onChange={(e) => update("status", e.target.value as Status)} style={inputStyle}>{statuses.map((status) => <option key={status}>{status}</option>)}</select></label>
       <label><div style={labelStyle}>Cost</div><input type="number" min="0" step="0.01" value={state.cost} onChange={(e) => update("cost", e.target.value)} style={inputStyle} placeholder="0.00" /></label>
@@ -815,7 +865,6 @@ function RecordEditor({ boat, engines, state, setState, onClose, onSaved }: { bo
       <label><div style={labelStyle}>Completed By</div><input value={state.completed_by} onChange={(e) => update("completed_by", e.target.value)} style={inputStyle} /></label>
       <label><div style={labelStyle}>Work Order</div><input value={state.work_order} onChange={(e) => update("work_order", e.target.value)} style={inputStyle} /></label>
     </div>
-    <label style={{ display: "block", marginTop: ".75rem" }}><div style={labelStyle}>Description</div><textarea value={state.description} onChange={(e) => update("description", e.target.value)} style={{ ...inputStyle, minHeight: "80px" }} /></label>
     <label style={{ display: "block", marginTop: ".75rem" }}><div style={labelStyle}>Notes</div><textarea value={state.notes} onChange={(e) => update("notes", e.target.value)} style={{ ...inputStyle, minHeight: "100px" }} /></label>
     <label style={{ display: "block", marginTop: ".75rem" }}><div style={labelStyle}>Photos</div><input type="file" accept="image/*" multiple onChange={addPhotos} disabled={uploading} style={inputStyle} /></label>
     {pendingFiles.length > 0 && <div style={{ color: "#cbd5e1", marginTop: ".5rem" }}>{pendingFiles.length} photo{pendingFiles.length === 1 ? "" : "s"} selected: {pendingFiles.map((file) => file.name).join(", ")} <span style={{ color: "#94a3b8" }}>(uploads when you save)</span></div>}
@@ -830,9 +879,9 @@ function RecordCard({ record, engines, onEdit, onDelete, onPhoto }: { record: Ma
       <div><h3 style={{ margin: 0 }}>{statusDot(record.status)} {record.title}</h3><div style={{ color: "#94a3b8", marginTop: ".25rem" }}>{recordTargetLabel(record, engines)} · {record.system}</div></div>
       <span style={badgeStyle(record.status === "Open Issue" ? "#991b1b" : record.status === "Scheduled" ? "#1d4ed8" : "#166534")}>{record.status}</span>
     </div>
-    <p>{record.category}{record.item ? ` · ${record.item}` : ""}{record.cost != null ? ` · $${Number(record.cost).toFixed(2)}` : ""}</p>
+    <p>{record.category}{record.cost != null ? ` · $${Number(record.cost).toFixed(2)}` : ""}</p>
     <p style={{ color: "#94a3b8" }}>Created {formatDate(record.date_created)}{record.due_date ? ` · Due ${formatDate(record.due_date)}` : ""}{record.completed_date ? ` · Completed ${formatDate(record.completed_date)}` : ""}</p>
-    {record.description && <p>{record.description}</p>}{record.notes && <p style={{ color: "#cbd5e1" }}>{record.notes}</p>}
+    {record.notes && <p style={{ color: "#cbd5e1" }}>{record.notes}</p>}
     {record.attachments?.length > 0 && <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap", marginBottom: ".75rem" }}>{record.attachments.map((path, i) => <button key={path} onClick={() => onPhoto(maintenancePhotoUrl(path))} style={{ ...buttonStyle, background: "#334155", padding: ".45rem .7rem" }}>Photo {i + 1}</button>)}</div>}
     <div style={{ display: "flex", gap: ".5rem" }}><button style={buttonStyle} onClick={onEdit}>Edit</button><button style={dangerButtonStyle} onClick={onDelete}>Delete</button></div>
   </div>;

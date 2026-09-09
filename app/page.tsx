@@ -17,13 +17,15 @@ export default function FleetPage() {
     Record<string, DueSummary>
   >({});
   const [engineServiceDue, setEngineServiceDue] = useState<Record<string, number>>({});
+  const [openIssueCounts, setOpenIssueCounts] = useState<Record<string, number>>({});
+  const [reportPeriod, setReportPeriod] = useState("30");
 
   useEffect(() => {
     async function loadFleet() {
       const [boatsResult, maintenanceResult, enginesResult] = await Promise.allSettled([
         fetchBoats(supabase),
-        supabase.from("maintenance_records").select("boat_id, due_date, status").neq("status", "Done"),
-        supabase.from("engines").select("boat_id, service_hours, service_interval_hours").not("boat_id", "is", null),
+        supabase.from("maintenance_records").select("boat_id, boat_id_at_time, engine_id, due_date, status").neq("status", "Done"),
+        supabase.from("engines").select("id, boat_id, service_hours, service_interval_hours"),
       ]);
 
       if (boatsResult.status === "rejected") {
@@ -47,21 +49,24 @@ export default function FleetPage() {
       }
 
       const data = maintenanceResult.value.data;
-
+      const engineRows = enginesResult.status === "fulfilled" && !enginesResult.value.error ? enginesResult.value.data ?? [] : [];
+      const engineBoat = Object.fromEntries(engineRows.map((engine) => [engine.id, engine.boat_id]));
       const grouped: Record<string, Array<{ due_date: string | null }>> = {};
+      const openCounts: Record<string, number> = {};
 
       for (const record of data ?? []) {
-        const boatId = String(record.boat_id);
+        const resolvedBoatId = record.boat_id ?? (record.engine_id ? engineBoat[record.engine_id] : null) ?? record.boat_id_at_time;
+        if (resolvedBoatId == null) continue;
+        const boatId = String(resolvedBoatId);
         grouped[boatId] ??= [];
         grouped[boatId].push({ due_date: record.due_date });
+        if (record.status === "Open Issue") openCounts[boatId] = (openCounts[boatId] ?? 0) + 1;
       }
 
       const summaries: Record<string, DueSummary> = {};
-      for (const [boatId, items] of Object.entries(grouped)) {
-        summaries[boatId] = summarizeDueDates(items);
-      }
-
+      for (const [boatId, items] of Object.entries(grouped)) summaries[boatId] = summarizeDueDates(items);
       setDueSummaries(summaries);
+      setOpenIssueCounts(openCounts);
 
       if (enginesResult.status === "rejected" || enginesResult.value.error) {
         console.error(
@@ -70,7 +75,7 @@ export default function FleetPage() {
         );
       } else {
         const serviceCounts: Record<string, number> = {};
-        for (const engine of enginesResult.value.data ?? []) {
+        for (const engine of engineRows) {
           if (engine.boat_id == null || !isEngineServiceDue(engine)) continue;
           const boatId = String(engine.boat_id);
           serviceCounts[boatId] = (serviceCounts[boatId] ?? 0) + 1;
@@ -83,6 +88,34 @@ export default function FleetPage() {
 
     void loadFleet();
   }, []);
+
+  async function exportFleetCompletedReport() {
+    const [{ data: records, error: recordsError }, { data: engineRows, error: enginesError }] = await Promise.all([
+      supabase.from("maintenance_records").select("*").eq("status", "Done"),
+      supabase.from("engines").select("id, engine_code"),
+    ]);
+    if (recordsError || enginesError) return alert(`Could not create fleet report:
+
+${recordsError?.message ?? enginesError?.message}`);
+
+    const cutoff = reportPeriod === "all" ? null : new Date(Date.now() - Number(reportPeriod) * 86400000);
+    const boatById = Object.fromEntries(boats.map((boat) => [boat.id, boat]));
+    const engineById = Object.fromEntries((engineRows ?? []).map((engine) => [engine.id, engine]));
+    const rows = (records ?? []).filter((record) => {
+      if (!record.completed_at && !record.completed_date) return false;
+      const completed = new Date(record.completed_at ?? `${record.completed_date}T12:00:00-10:00`);
+      return !cutoff || completed >= cutoff;
+    }).map((record) => {
+      const boatId = record.boat_id ?? record.boat_id_at_time;
+      const boat = boatId ? boatById[boatId] : undefined;
+      return {
+        boat_code: boat?.boat_code ?? "", boat_name: boat?.name ?? "", completed_at: record.completed_at ?? "", completed_date: record.completed_date ?? "",
+        record_type: record.target_type === "engine" ? "Engine" : "Vessel", engine_code: record.engine_id ? engineById[record.engine_id]?.engine_code ?? "" : "",
+        title: record.title, system: record.system, category: record.category, completed_by: record.completed_by ?? "", work_order: record.work_order ?? "", cost: record.cost ?? "", notes: record.notes ?? "",
+      };
+    });
+    downloadCsv(`fleet-completed-work-${reportPeriod === "all" ? "all-time" : `last-${reportPeriod}-days`}.csv`, rows);
+  }
 
   return (
     <main
@@ -153,6 +186,7 @@ export default function FleetPage() {
           {boats.map((boat) => {
             const due = dueSummaries[boat.id] ?? { overdue: 0, dueSoon: 0 };
             const servicesDue = engineServiceDue[boat.id] ?? 0;
+            const openIssues = openIssueCounts[boat.id] ?? 0;
 
             return (
               <Link
@@ -329,12 +363,19 @@ export default function FleetPage() {
                       </div>
                     )}
 
+                    {openIssues > 0 && (
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: ".75rem", marginTop: servicesDue > 0 ? ".7rem" : "1rem", padding: ".65rem .75rem", borderRadius: "10px", background: "#3f1d1d", border: "1px solid #b45309", color: "#fed7aa" }}>
+                        <strong style={{ fontSize: ".88rem" }}>OPEN ISSUES</strong>
+                        <strong style={{ minWidth: "2rem", padding: ".2rem .55rem", borderRadius: "999px", textAlign: "center", background: "#7c2d12", color: "#fed7aa" }}>{openIssues}</strong>
+                      </div>
+                    )}
+
                     <div
                       style={{
                         display: "flex",
                         justifyContent: "space-between",
                         alignItems: "center",
-                        marginTop: servicesDue > 0 ? ".7rem" : "1rem",
+                        marginTop: servicesDue > 0 || openIssues > 0 ? ".7rem" : "1rem",
                         paddingTop: ".9rem",
                         borderTop: "1px solid #334155",
                       }}
@@ -380,7 +421,24 @@ export default function FleetPage() {
             );
           })}
         </section>
+
+        <section style={{ marginTop: "2rem", padding: "1rem", borderRadius: "14px", background: "#0f172a", border: "1px solid #334155", display: "flex", justifyContent: "space-between", gap: "1rem", alignItems: "end", flexWrap: "wrap" }}>
+          <div><h2 style={{ margin: 0 }}>Fleet Completed Work Log</h2><p style={{ color: "#94a3b8", margin: ".4rem 0 0" }}>Export completed maintenance across every vessel and engine.</p></div>
+          <div style={{ display: "flex", gap: ".5rem", alignItems: "end", flexWrap: "wrap" }}>
+            <label><div style={{ marginBottom: ".25rem", fontWeight: 700, color: "#cbd5e1" }}>Period</div><select value={reportPeriod} onChange={(e) => setReportPeriod(e.target.value)} style={{ minHeight: "44px", padding: ".65rem", borderRadius: "8px", border: "1px solid #334155", background: "#020617", color: "#f8fafc" }}><option value="7">Last 7 days</option><option value="30">Last 30 days</option><option value="365">Last year</option><option value="all">All time</option></select></label>
+            <button onClick={() => void exportFleetCompletedReport()} style={{ minHeight: "44px", padding: ".65rem 1rem", borderRadius: "10px", border: "none", background: "#0f766e", color: "white", fontWeight: 700, cursor: "pointer" }}>Export Fleet CSV</button>
+          </div>
+        </section>
       </div>
     </main>
   );
+}
+function downloadCsv(filename: string, rows: Record<string, unknown>[]) {
+  if (!rows.length) return alert("There are no completed records to export for that period.");
+  const headers = Object.keys(rows[0]);
+  const esc = (value: unknown) => `"${String(value ?? "").replaceAll('"', '""')}"`;
+  const csv = [headers.map(esc).join(","), ...rows.map((row) => headers.map((header) => esc(row[header])).join(","))].join("\n");
+  const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+  const anchor = document.createElement("a");
+  anchor.href = url; anchor.download = filename; anchor.click(); URL.revokeObjectURL(url);
 }
